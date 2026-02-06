@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv()
+import os
 import streamlit as st
 from pricing_ai_for_ui import run_pricing_pipeline  # your main function
 

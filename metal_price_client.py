@@ -1,7 +1,11 @@
 import requests
-
+import os
 METAL_PRICE_API_URL = "https://api.metalpriceapi.com/v1/latest"
-METAL_API_KEY = "0c0e62d8d2cdcb94cea80d44b842c396"
+METAL_API_KEY = os.getenv("METAL_PRICE_API_KEY")
+
+if not METAL_API_KEY:
+    raise RuntimeError("METAL_PRICE_API_KEY not set in environment")
+
 
 TROY_OUNCE_TO_GRAMS = 31.1035
 

@@ -1,7 +1,10 @@
 import ollama
 import json
 import re
+from dotenv import load_dotenv
+import os
 
+load_dotenv()
 from rapnet_client import (
     build_rapnet_payload,
     call_rapnet_api,
