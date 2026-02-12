@@ -3,7 +3,7 @@ import json
 import re
 from dotenv import load_dotenv
 import os
-
+from rapnet_client import get_anchor_with_fallback
 load_dotenv()
 from rapnet_client import (
     build_rapnet_payload,
@@ -179,7 +179,7 @@ def apply_anchor_and_adjustment(anchor, adjustment_percent):
 # ----------------------------
 # MAIN PIPELINE (THIS IS WHAT UI CALLS)
 # ----------------------------
-def run_pricing_pipeline(user_input):
+def run_pricing_pipeline(user_input, ai_layer="Disabled"):
 
     # ---- Clean loose diamond inputs ----
     if user_input.get("jewelry_type") == "Loose Diamond":
@@ -190,7 +190,14 @@ def run_pricing_pipeline(user_input):
     # ---- RapNet anchor ----
     rapnet_payload = build_rapnet_payload(user_input["center_stone"])
     rapnet_response = call_rapnet_api(rapnet_payload)
-    diamond_anchor = compute_anchor_from_rapnet(rapnet_response)
+    diamond_anchor = get_anchor_with_fallback(
+    user_input["center_stone"],
+    call_rapnet_api,
+    compute_anchor_from_rapnet
+)
+
+    if diamond_anchor is None:
+        raise Exception("No RapNet comps found even after fallback relaxation")
 
 
     # ---- Metal pricing ----
@@ -216,9 +223,12 @@ def run_pricing_pipeline(user_input):
     
 
     # ---- AI adjustment ----
-    prompt = build_prompt(user_input)
-    raw = query_llava(prompt, user_input["images"])
-    ai_result = parse_and_clamp(raw, user_input)
+    if ai_layer == "Enabled":
+        prompt = build_prompt(user_input)
+        raw = query_llava(prompt, user_input["images"])
+        ai_result = parse_and_clamp(raw, user_input)
+    else:
+        ai_result = {"adjustment_percent": 0.0}
 
     # ---- Final price ----
     final_price = apply_anchor_and_adjustment(

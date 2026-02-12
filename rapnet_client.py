@@ -1,5 +1,7 @@
 import requests
 import os
+COLOR_ORDER = ["D","E","F","G","H","I","J","K","L","M"]
+CLARITY_ORDER = ["IF","VVS1","VVS2","VS1","VS2","SI1","SI2","SI3","I1","I2","I3"]
 
 RAPNET_URL = "https://technet.rapnetapis.com/instant-inventory/api/Diamonds"
 
@@ -9,41 +11,93 @@ if not RAPNET_BEARER_TOKEN:
     raise RuntimeError("RAPNET_BEARER_TOKEN not set in environment")
 TIMEOUT_SECONDS = 15
 
-def build_rapnet_payload(center_stone):
-    body = {
-        "search_type": "White",
-        "shapes": [center_stone.get("shape", "Round")],
-        "size_from": max(center_stone.get("carat", 0.9) - 0.15, 0.01),
-        "size_to": center_stone.get("carat", 1.0) + 0.15,
-        "page_number": 1,
-        "page_size": 50,
-        "sort_by": "Price",
-        "sort_direction": "Asc",
-        "labs": ["GIA"],
-        "fluorescence_intensities": ["None"]
-    }
-
-    # ✅ Color filter only if known
+def build_rapnet_payload(center_stone, color_from=None, color_to=None, clarity_from=None, clarity_to=None, carat_from=None, carat_to=None):
+    shape = center_stone.get("shape")
+    carat = center_stone.get("carat")
     color = center_stone.get("color")
-    if isinstance(color, str) and len(color) == 1:
-        body["color_from"] = color
-        body["color_to"] = chr(ord(color) + 1)  # G → H
-
-    # ✅ Clarity filter only if known
     clarity = center_stone.get("clarity")
-    if isinstance(clarity, str):
-        body["clarity_from"] = clarity
-        body["clarity_to"] = clarity
 
-    return {
+    # fallback defaults
+    if carat_from is None:
+        carat_from = round(carat - 0.1, 2)
+    if carat_to is None:
+        carat_to = round(carat + 0.1, 2)
+
+    if color_from is None:
+        color_from = color
+    if color_to is None:
+        color_to = color
+
+    if clarity_from is None:
+        clarity_from = clarity
+    if clarity_to is None:
+        clarity_to = clarity
+
+    payload = {
         "request": {
-            "header": {
-                "Authorization": f"Bearer {RAPNET_BEARER_TOKEN}",
-                "Content-Type": "application/json"
-            },
-            "body": body
+            "header": {},
+            "body": {
+                "search_type": "White",
+                "shapes": [shape],
+                "size_from": str(carat_from),
+                "size_to": str(carat_to),
+                "color_from": color_from,
+                "color_to": color_to,
+                "clarity_from": clarity_from,
+                "clarity_to": clarity_to,
+                "labs": ["GIA"],
+                "fluorescence_intensities": ["None"],
+                "page_number": 1,
+                "page_size": 50,
+                "sort_by": "Price",
+                "sort_direction": "Asc"
+            }
         }
     }
+    return payload
+def get_anchor_with_fallback(center_stone, call_rapnet_api, compute_anchor):
+    color = center_stone.get("color")
+    clarity = center_stone.get("clarity")
+    carat = center_stone.get("carat")
+
+    # indexes
+    color_idx = COLOR_ORDER.index(color)
+    clarity_idx = CLARITY_ORDER.index(clarity)
+
+    carat_ranges = [
+        (carat - 0.1, carat + 0.1),
+        (carat - 0.5, carat + 0.5)
+    ]
+
+    for cr in carat_ranges:
+        for color_expand in range(0, 3):
+            for clarity_expand in range(0, 3):
+                c_from = COLOR_ORDER[max(0, color_idx - color_expand)]
+                c_to   = COLOR_ORDER[min(len(COLOR_ORDER)-1, color_idx + color_expand)]
+
+                cl_from = CLARITY_ORDER[max(0, clarity_idx - clarity_expand)]
+                cl_to   = CLARITY_ORDER[min(len(CLARITY_ORDER)-1, clarity_idx + clarity_expand)]
+
+                payload = build_rapnet_payload(
+                    center_stone,
+                    color_from=c_from,
+                    color_to=c_to,
+                    clarity_from=cl_from,
+                    clarity_to=cl_to,
+                    carat_from=round(cr[0],2),
+                    carat_to=round(cr[1],2)
+                )
+
+                try:
+                    res = call_rapnet_api(payload)
+                    anchor = compute_anchor(res)
+                    if anchor:
+                        return anchor
+                except:
+                    continue
+
+    return None
+
 
 
 

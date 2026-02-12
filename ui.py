@@ -41,6 +41,10 @@ condition = st.selectbox(
     "Condition",
     ["Excellent", "Like New", "Good", "Fair"]
 )
+ai_layer = st.selectbox(
+    "AI Layer",
+    options=["Disabled", "Enabled"]
+)
 
 metal = purity = metal_weight = None
 
@@ -52,6 +56,11 @@ if jewelry_type == "Diamond Jewelry":
     metal_weight = st.number_input("Approx Metal Weight (grams)", min_value=0.0)
 
 if st.button("Get Price Estimate"):
+    # 🚫 If AI layer is enabled → stop here
+    if ai_layer == "Enabled":
+        st.warning("AI layer is currently under development. Please use Disabled mode for now.")
+        st.stop()   # ⛔ IMPORTANT — stops execution
+
     user_input = {
         "images": images,
         "jewelry_type": jewelry_type,
@@ -71,7 +80,7 @@ if st.button("Get Price Estimate"):
         "metal_weight_grams": metal_weight
     }
 
-    result = run_pricing_pipeline(user_input)
+    result = run_pricing_pipeline(user_input, ai_layer)
 
     st.subheader("Result")
     st.json(result)
