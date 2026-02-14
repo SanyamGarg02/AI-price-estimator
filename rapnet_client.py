@@ -5,10 +5,7 @@ CLARITY_ORDER = ["IF","VVS1","VVS2","VS1","VS2","SI1","SI2","SI3","I1","I2","I3"
 
 RAPNET_URL = "https://technet.rapnetapis.com/instant-inventory/api/Diamonds"
 
-RAPNET_BEARER_TOKEN = os.getenv("RAPNET_BEARER_TOKEN")
 
-if not RAPNET_BEARER_TOKEN:
-    raise RuntimeError("RAPNET_BEARER_TOKEN not set in environment")
 TIMEOUT_SECONDS = 15
 
 def build_rapnet_payload(center_stone, color_from=None, color_to=None, clarity_from=None, clarity_to=None, carat_from=None, carat_to=None):
@@ -55,7 +52,7 @@ def build_rapnet_payload(center_stone, color_from=None, color_to=None, clarity_f
         }
     }
     return payload
-def get_anchor_with_fallback(center_stone, call_rapnet_api, compute_anchor):
+def get_anchor_with_fallback(center_stone, bearer_token, compute_anchor):
     color = center_stone.get("color")
     clarity = center_stone.get("clarity")
     carat = center_stone.get("carat")
@@ -89,7 +86,7 @@ def get_anchor_with_fallback(center_stone, call_rapnet_api, compute_anchor):
                 )
 
                 try:
-                    res = call_rapnet_api(payload)
+                    res = call_rapnet_api(payload, bearer_token)
                     anchor = compute_anchor(res)
                     if anchor:
                         return anchor
@@ -102,9 +99,9 @@ def get_anchor_with_fallback(center_stone, call_rapnet_api, compute_anchor):
 
 
 
-def call_rapnet_api(payload):
+def call_rapnet_api(payload, bearer_token):
     headers = {
-        "Authorization": f"Bearer {RAPNET_BEARER_TOKEN}",
+        "Authorization": f"Bearer {bearer_token}",
         "Content-Type": "application/json"
     }
 

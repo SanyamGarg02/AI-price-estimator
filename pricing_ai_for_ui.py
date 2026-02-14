@@ -179,7 +179,7 @@ def apply_anchor_and_adjustment(anchor, adjustment_percent):
 # ----------------------------
 # MAIN PIPELINE (THIS IS WHAT UI CALLS)
 # ----------------------------
-def run_pricing_pipeline(user_input, ai_layer="Disabled"):
+def run_pricing_pipeline(user_input, rapnet_token, ai_layer="Disabled"):
 
     # ---- Clean loose diamond inputs ----
     if user_input.get("jewelry_type") == "Loose Diamond":
@@ -189,10 +189,10 @@ def run_pricing_pipeline(user_input, ai_layer="Disabled"):
 
     # ---- RapNet anchor ----
     rapnet_payload = build_rapnet_payload(user_input["center_stone"])
-    rapnet_response = call_rapnet_api(rapnet_payload)
+    rapnet_response = call_rapnet_api(rapnet_payload, rapnet_token)
     diamond_anchor = get_anchor_with_fallback(
     user_input["center_stone"],
-    call_rapnet_api,
+    rapnet_token,
     compute_anchor_from_rapnet
 )
 

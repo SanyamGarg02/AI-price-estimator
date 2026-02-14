@@ -5,7 +5,10 @@ import streamlit as st
 from pricing_ai_for_ui import run_pricing_pipeline  # your main function
 
 st.title("AI Price Estimation MVP")
-
+rapnet_token = st.text_input(
+    "Enter RapNet Bearer Token",
+    type="password"
+)
 # Images
 uploaded_files = st.file_uploader(
     "Upload up to 3 images",
@@ -80,7 +83,7 @@ if st.button("Get Price Estimate"):
         "metal_weight_grams": metal_weight
     }
 
-    result = run_pricing_pipeline(user_input, ai_layer)
+    result = run_pricing_pipeline(user_input, rapnet_token, ai_layer)
 
     st.subheader("Result")
     st.json(result)
