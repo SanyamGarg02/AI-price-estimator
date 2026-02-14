@@ -5,12 +5,12 @@ import os
 
 try:
     import streamlit as st
-    METAL_API_KEY = st.secrets.get("METAL_API_KEY")
+    METAL_PRICE_API_KEY = st.secrets.get("METAL_PRICE_API_KEY")
 except Exception:
-    METAL_API_KEY = os.getenv("METAL_API_KEY")
+    METAL_PRICE_API_KEY = os.getenv("METAL_PRICE_API_KEY")
 
 
-if not METAL_API_KEY:
+if not METAL_PRICE_API_KEY:
     raise RuntimeError("METAL_PRICE_API_KEY not set in environment")
 
 
@@ -27,7 +27,7 @@ PURITY_FACTORS = {
 
 def fetch_metal_prices():
     params = {
-        "api_key": METAL_API_KEY,
+        "api_key": METAL_PRICE_API_KEY,
         "base": "USD",
         "currencies": "XAU,XPT"
     }
