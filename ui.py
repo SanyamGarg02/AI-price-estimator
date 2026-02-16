@@ -3,6 +3,17 @@ load_dotenv()
 import os
 import streamlit as st
 from pricing_ai_for_ui import run_pricing_pipeline  # your main function
+SHAPES = [
+    "Round", "Pear", "Princess", "Marquise", "Oval",
+    "Radiant", "Emerald", "Heart", "Cushion", "Asscher"
+]
+
+COLORS = ["D", "E", "F", "G", "H", "I", "J", "K", "L", "M"]
+
+CLARITIES = [
+    "IF", "VVS1", "VVS2", "VS1", "VS2",
+    "SI1", "SI2", "SI3", "I1", "I2", "I3"
+]
 
 st.title("AI Price Estimation MVP")
 rapnet_token = st.text_input(
@@ -28,10 +39,19 @@ jewelry_type = st.selectbox(
 )
 
 st.subheader("Center Stone Details")
-shape = st.text_input("Shape")
 carat = st.number_input("Carat", min_value=0.0, step=0.01)
-color = st.text_input("Color (optional)")
-clarity = st.text_input("Clarity (optional)")
+shape = st.selectbox("Shape", SHAPES)
+
+color = st.selectbox(
+    "Color",
+    options=["Unknown"] + COLORS
+)
+
+clarity = st.selectbox(
+    "Clarity",
+    options=["Unknown"] + CLARITIES
+)
+
 cut = st.selectbox("Cut", ["Excellent", "Very Good", "Good", "Fair"])
 polish = st.selectbox("Polish", ["Excellent", "Very Good", "Good", "Fair"])
 symmetry = st.selectbox("Symmetry", ["Excellent", "Very Good", "Good", "Fair"])
@@ -70,8 +90,8 @@ if st.button("Get Price Estimate"):
         "center_stone": {
             "shape": shape,
             "carat": carat,
-            "color": color or None,
-            "clarity": clarity or None,
+            "color": None if color == "Unknown" else color,
+            "clarity": None if clarity == "Unknown" else clarity,
             "cut": cut,
             "polish": polish,
             "symmetry": symmetry,
