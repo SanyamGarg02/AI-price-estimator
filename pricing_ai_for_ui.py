@@ -5,12 +5,13 @@ from dotenv import load_dotenv
 import os
 from rapnet_client import get_anchor_with_fallback
 load_dotenv()
+PRICE_SOURCE = os.getenv("PRICE_SOURCE", "rapnet").lower()
 from rapnet_client import (
     build_rapnet_payload,
     call_rapnet_api,
     compute_anchor_from_rapnet
 )
-
+from gemgem_client import get_anchor_with_fallback_gemgem
 from metal_price_client import compute_metal_value
 
 
@@ -187,18 +188,34 @@ def run_pricing_pipeline(user_input, rapnet_token, ai_layer="Disabled"):
         user_input.pop("purity", None)
         user_input.pop("metal_weight_grams", None)
 
-    # ---- RapNet anchor ----
-    rapnet_payload = build_rapnet_payload(user_input["center_stone"])
-    rapnet_response = call_rapnet_api(rapnet_payload, rapnet_token)
-    diamond_anchor = get_anchor_with_fallback(
-    user_input["center_stone"],
-    rapnet_token,
-    compute_anchor_from_rapnet
-)
+    # ----------------------------
+    # PRICE SOURCE SWITCH
+    # ----------------------------
 
-    if diamond_anchor is None:
-        raise Exception("No RapNet comps found even after fallback relaxation")
+    if PRICE_SOURCE == "rapnet":
 
+        diamond_anchor = get_anchor_with_fallback(
+            user_input["center_stone"],
+            rapnet_token,
+            call_rapnet_api,
+            compute_anchor_from_rapnet
+        )
+
+        if diamond_anchor is None:
+            raise Exception("No RapNet comps found even after fallback relaxation")
+
+
+    elif PRICE_SOURCE == "gemgem":
+
+        diamond_anchor = get_anchor_with_fallback_gemgem(
+            user_input["center_stone"]
+        )
+
+        if diamond_anchor is None:
+            raise Exception("No GemGem comps found even after fallback relaxation")
+
+    else:
+        raise Exception(f"Invalid PRICE_SOURCE: {PRICE_SOURCE}")
 
     # ---- Metal pricing ----
     metal_value = 0.0

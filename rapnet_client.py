@@ -8,11 +8,12 @@ RAPNET_URL = "https://technet.rapnetapis.com/instant-inventory/api/Diamonds"
 
 TIMEOUT_SECONDS = 15
 
-def build_rapnet_payload(center_stone, color_from=None, color_to=None, clarity_from=None, clarity_to=None, carat_from=None, carat_to=None):
+def build_rapnet_payload(center_stone, color_from=None, color_to=None, clarity_from=None, clarity_to=None, carat_from=None, carat_to=None,fluoro=None):
     shape = center_stone.get("shape")
     carat = center_stone.get("carat")
     color = center_stone.get("color")
     clarity = center_stone.get("clarity")
+    fluoro = center_stone.get("fluorescence")
 
     # fallback defaults
     if carat_from is None:
@@ -24,6 +25,10 @@ def build_rapnet_payload(center_stone, color_from=None, color_to=None, clarity_f
         color_from = color
     if color_to is None:
         color_to = color
+    if fluoro and fluoro.lower() != "none":
+        fluorescence_filter = [fluoro]
+    else:
+        fluorescence_filter = None
 
     if clarity_from is None:
         clarity_from = clarity
@@ -43,19 +48,20 @@ def build_rapnet_payload(center_stone, color_from=None, color_to=None, clarity_f
                 "clarity_from": clarity_from,
                 "clarity_to": clarity_to,
                 "labs": ["GIA"],
-                "fluorescence_intensities": ["None"],
-                "page_number": 1,
-                "page_size": 50,
+                "fluorescence_intensities": fluorescence_filter or ["None"],
+                "page_number": "1",
+                "page_size": "50",
                 "sort_by": "Price",
                 "sort_direction": "Asc"
             }
         }
     }
     return payload
-def get_anchor_with_fallback(center_stone, bearer_token, compute_anchor):
+def get_anchor_with_fallback(center_stone, rapnet_token,call_rapnet_api, compute_anchor):
     color = center_stone.get("color")
     clarity = center_stone.get("clarity")
     carat = center_stone.get("carat")
+    fluorescence = center_stone.get("fluorescence")
 
     # indexes
     color_idx = COLOR_ORDER.index(color)
@@ -82,15 +88,17 @@ def get_anchor_with_fallback(center_stone, bearer_token, compute_anchor):
                     clarity_from=cl_from,
                     clarity_to=cl_to,
                     carat_from=round(cr[0],2),
-                    carat_to=round(cr[1],2)
+                    carat_to=round(cr[1],2),
+                    fluoro=fluorescence
                 )
 
                 try:
-                    res = call_rapnet_api(payload, bearer_token)
+                    res = call_rapnet_api(payload, rapnet_token)
                     anchor = compute_anchor(res)
-                    if anchor:
+                    if anchor is not None:
                         return anchor
-                except:
+                except Exception as e:
+                    print("ERROR in anchor compute:", e)
                     continue
 
     return None
@@ -99,9 +107,13 @@ def get_anchor_with_fallback(center_stone, bearer_token, compute_anchor):
 
 
 
-def call_rapnet_api(payload, bearer_token):
+def call_rapnet_api(payload, rapnet_token):
+    print("\n================ RAPNET REQUEST ================")
+    print(payload)
+    print("================================================\n")
+
     headers = {
-        "Authorization": f"Bearer {bearer_token}",
+        "Authorization": f"Bearer {rapnet_token}",
         "Content-Type": "application/json"
     }
 
@@ -125,7 +137,7 @@ def compute_anchor_from_rapnet(rapnet_response):
         if d.get("total_sales_price") is not None
     ]
 
-    if len(prices) < 3:
+    if len(prices) < 1:
         return None  # <-- IMPORTANT
 
     prices.sort()
