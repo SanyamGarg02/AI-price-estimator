@@ -95,8 +95,28 @@ def get_anchor_with_fallback(center_stone, rapnet_token,call_rapnet_api, compute
                 try:
                     res = call_rapnet_api(payload, rapnet_token)
                     anchor = compute_anchor(res)
+
                     if anchor is not None:
-                        return anchor
+
+                        return {
+                            "low": anchor["low"],
+                            "high": anchor["high"],
+
+                            "effective_specs": {
+                            "carat_min": round(cr[0], 2),
+                            "carat_max": round(cr[1], 2),
+                            "color": [c_from, c_to],
+                            "clarity": [cl_from, cl_to],
+                            "shape": center_stone.get("shape"),
+                            "cut": center_stone.get("cut"),
+                            "lab": payload["request"]["body"]["labs"][0] if payload["request"]["body"].get("labs") else None
+            },
+
+            "result_count": anchor.get("result_count", 0),
+
+            "used_fallback": (color_expand > 0 or clarity_expand > 0 or cr != carat_ranges[0])
+    }
+
                 except Exception as e:
                     print("ERROR in anchor compute:", e)
                     continue
@@ -138,12 +158,12 @@ def compute_anchor_from_rapnet(rapnet_response):
     ]
 
     if len(prices) < 1:
-        return None  # <-- IMPORTANT
+        return None
 
     prices.sort()
 
     return {
         "low": round(prices[int(len(prices) * 0.25)], 2),
-        "high": round(prices[int(len(prices) * 0.75)], 2)
+        "high": round(prices[int(len(prices) * 0.75)], 2),
+        "result_count": len(prices)
     }
-

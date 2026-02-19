@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 import os
 from rapnet_client import get_anchor_with_fallback
 load_dotenv()
-PRICE_SOURCE = os.getenv("PRICE_SOURCE", "rapnet").lower()
+PRICE_SOURCE = os.getenv("PRICE_SOURCE", "gemgem").lower()
 from rapnet_client import (
     build_rapnet_payload,
     call_rapnet_api,
@@ -200,6 +200,9 @@ def run_pricing_pipeline(user_input, rapnet_token, ai_layer="Disabled"):
             call_rapnet_api,
             compute_anchor_from_rapnet
         )
+        effective_specs = diamond_anchor.get("effective_specs")
+        # fallback_meta   = diamond_anchor.get("fallback_level")
+        # result_count    = diamond_anchor.get("result_count")
 
         if diamond_anchor is None:
             raise Exception("No RapNet comps found even after fallback relaxation")
@@ -210,6 +213,9 @@ def run_pricing_pipeline(user_input, rapnet_token, ai_layer="Disabled"):
         diamond_anchor = get_anchor_with_fallback_gemgem(
             user_input["center_stone"]
         )
+        effective_specs = diamond_anchor.get("effective_specs")
+        # fallback_meta   = diamond_anchor.get("fallback_level")
+        # result_count    = diamond_anchor.get("result_count")    
 
         if diamond_anchor is None:
             raise Exception("No GemGem comps found even after fallback relaxation")
@@ -254,12 +260,32 @@ def run_pricing_pipeline(user_input, rapnet_token, ai_layer="Disabled"):
     )
 
     return {
-        "diamond_anchor": diamond_anchor,
-        "base_price": base_price,
-        "metal_value": metal_value,
-        "ai_adjustment": ai_result,
-        "final_price": final_price
+        "diamond_anchor": {
+            "low": diamond_anchor["low"],
+            "high": diamond_anchor["high"]
+        },
+    #     "effective_specs": effective_specs,
+    #     "base_price": base_price,
+    #     "metal_value": metal_value,
+    #     "ai_adjustment": ai_result,
+    #     "final_price": final_price
+    # }
+    "effective_specs": diamond_anchor.get("effective_specs"),
+
+    "used_fallback": diamond_anchor.get("used_fallback", False),
+
+    "base_price": base_price,
+
+    "metal_value": metal_value,
+
+    "ai_adjustment": ai_result,
+
+    "final_price": {
+        "low": final_price["final_price_low_usd"],
+        "high": final_price["final_price_high_usd"]
     }
+}
+
 
 
 # ----------------------------

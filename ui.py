@@ -102,8 +102,24 @@ if st.button("Get Price Estimate"):
         "purity": purity,
         "metal_weight_grams": metal_weight
     }
+    with st.spinner("Analyzing market comps and relaxing filters if needed..."):
+        result = run_pricing_pipeline(user_input, rapnet_token, ai_layer)
 
-    result = run_pricing_pipeline(user_input, rapnet_token, ai_layer)
+    # result = run_pricing_pipeline(user_input, rapnet_token, ai_layer)
+    eff = result.get("effective_specs")
+    used_fallback = result.get("used_fallback", False)
+
+    if eff and used_fallback:
+        st.info(
+            f"""
+    ⚠️ Exact match not found. Showing closest market comps.
+
+    Results are based on:
+    Carat: {eff['carat_min']} – {eff['carat_max']} ct  
+    Color: {', '.join(eff['color'])}  
+    Clarity: {', '.join(eff['clarity'])}
+    """
+    )
 
     st.subheader("Result")
     st.json(result)

@@ -48,18 +48,29 @@ def get_anchor_with_fallback_gemgem(center_stone):
     clarity_idx = CLARITY_ORDER.index(clarity)
 
     carat_ranges = [
-        (round(carat - 0.1, 2), round(carat + 0.1, 2)),   # strict
-        (round(carat - 0.5, 2), round(carat + 0.5, 2))    # relaxed
+        (round(carat - 0.1, 2), round(carat + 0.1, 2), 0),   # strict
+        (round(carat - 0.5, 2), round(carat + 0.5, 2), 1)    # relaxed
     ]
 
-    for cr in carat_ranges:
+    MIN_COMPS = 1
+
+    for carat_min, carat_max, carat_step in carat_ranges:
 
         for expand in range(0, 2):   # 0 = exact, 1 = relaxed
 
-            colors = COLOR_ORDER[max(0, color_idx-expand): min(len(COLOR_ORDER), color_idx+expand+1)]
-            clarities = CLARITY_ORDER[max(0, clarity_idx-expand): min(len(CLARITY_ORDER), clarity_idx+expand+1)]
+            color_step = expand
+            clarity_step = expand
 
-            payload = build_gemgem_payload(center_stone, colors, clarities, cr[0], cr[1])
+            colors = COLOR_ORDER[
+                max(0, color_idx-expand): min(len(COLOR_ORDER), color_idx+expand+1)
+            ]
+
+            clarities = CLARITY_ORDER[
+                max(0, clarity_idx-expand): min(len(CLARITY_ORDER), clarity_idx+expand+1)
+            ]
+
+            payload = build_gemgem_payload(center_stone, colors, clarities, carat_min, carat_max)
+
             print("\n================ GEMGEM REQUEST ================")
             print(payload)
             print("================================================\n")
@@ -71,21 +82,38 @@ def get_anchor_with_fallback_gemgem(center_stone):
                 products = data["data"]["products"]["data"]
                 print("GemGem products found:", len(products))
 
-
                 prices = [
                     p["price"]["USD"]["price"]
                     for p in products
-                    if p.get("price")
+                    if p.get("price") and p["price"]["USD"].get("price")
                 ]
 
-                if len(prices) > 0:
+                if len(prices) >= MIN_COMPS:
                     prices.sort()
+
                     return {
-                        "low": prices[int(len(prices)*0.25)],
-                        "high": prices[int(len(prices)*0.75)]
+                        "low": prices[int(len(prices) * 0.25)],
+                        "high": prices[int(len(prices) * 0.75)],
+                        "effective_specs": {
+                            "carat_min": carat_min,
+                            "carat_max": carat_max,
+                            "color": colors,
+                            "clarity": clarities,
+                            "shape": center_stone["shape"],
+                            "cut": center_stone.get("cut"),
+                            "lab": center_stone.get("lab")
+                        },
+                        "fallback_level": {
+                            "carat_step": carat_step,
+                            "color_step": color_step,
+                            "clarity_step": clarity_step
+                        },
+                        "result_count": len(prices),
+                        "used_fallback": (carat_step != 0 or color_step != 0 or clarity_step != 0)
                     }
 
-            except Exception:
+            except Exception as e:
+                print("GemGem request failed:", e)
                 continue
 
     return None
