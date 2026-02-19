@@ -2,6 +2,9 @@ from dotenv import load_dotenv
 load_dotenv()
 import os
 import streamlit as st
+PRICE_SOURCE = os.getenv("PRICE_SOURCE", "gemgem").lower()
+USE_RAPNET = PRICE_SOURCE == "rapnet"
+ENABLE_AI = os.getenv("ENABLE_AI", "false").lower() == "true"
 from pricing_ai_for_ui import run_pricing_pipeline  # your main function
 SHAPES = [
     "Round", "Pear", "Princess", "Marquise", "Oval",
@@ -16,21 +19,28 @@ CLARITIES = [
 ]
 
 st.title("AI Price Estimation MVP")
-rapnet_token = st.text_input(
-    "Enter RapNet Bearer Token",
-    type="password"
-)
-# Images
-uploaded_files = st.file_uploader(
-    "Upload up to 3 images",
-    type=["jpg", "jpeg", "png"],
-    accept_multiple_files=True
-)
+rapnet_token = None
 
+if USE_RAPNET:
+    rapnet_token = st.text_input(
+        "Enter RapNet Bearer Token",
+        type="password"
+    )
+
+# Images
 images = []
-if uploaded_files:
-    for file in uploaded_files:
-        images.append(file.getvalue())  # ✅ convert to bytes
+
+if ENABLE_AI:
+    uploaded_files = st.file_uploader(
+        "Upload up to 3 images",
+        type=["jpg", "jpeg", "png"],
+        accept_multiple_files=True
+    )
+
+    if uploaded_files:
+        for file in uploaded_files:
+            images.append(file.getvalue())
+
 
 
 jewelry_type = st.selectbox(
@@ -52,9 +62,9 @@ clarity = st.selectbox(
     options=["Unknown"] + CLARITIES
 )
 
-cut = st.selectbox("Cut", ["Excellent", "Very Good", "Good", "Fair"])
-polish = st.selectbox("Polish", ["Excellent", "Very Good", "Good", "Fair"])
-symmetry = st.selectbox("Symmetry", ["Excellent", "Very Good", "Good", "Fair"])
+cut = st.selectbox("Cut", ["Unknown", "Excellent", "Very Good", "Good", "Fair"])
+polish = st.selectbox("Polish", ["Unknown", "Excellent", "Very Good", "Good", "Fair"])
+symmetry = st.selectbox("Symmetry", ["Unknown", "Excellent", "Very Good", "Good", "Fair"])
 fluorescence = st.selectbox(
     "Fluorescence",
     ["None", "Faint", "Medium", "Strong", "Very Strong"]
@@ -64,10 +74,7 @@ condition = st.selectbox(
     "Condition",
     ["Excellent", "Like New", "Good", "Fair"]
 )
-ai_layer = st.selectbox(
-    "AI Layer",
-    options=["Disabled", "Enabled"]
-)
+
 
 metal = purity = metal_weight = None
 
@@ -80,9 +87,10 @@ if jewelry_type == "Diamond Jewelry":
 
 if st.button("Get Price Estimate"):
     # 🚫 If AI layer is enabled → stop here
-    if ai_layer == "Enabled":
-        st.warning("AI layer is currently under development. Please use Disabled mode for now.")
-        st.stop()   # ⛔ IMPORTANT — stops execution
+    
+    if USE_RAPNET and not rapnet_token:
+        st.error("RapNet token is required for RapNet pricing")
+        st.stop()
 
     user_input = {
         "images": images,
@@ -92,9 +100,9 @@ if st.button("Get Price Estimate"):
             "carat": carat,
             "color": None if color == "Unknown" else color,
             "clarity": None if clarity == "Unknown" else clarity,
-            "cut": cut,
-            "polish": polish,
-            "symmetry": symmetry,
+            "cut": None if cut == "Unknown" else cut,
+            "polish": None if polish == "Unknown" else polish,
+            "symmetry": None if symmetry == "Unknown" else symmetry,
             "fluorescence": fluorescence
         },
         "condition": condition,
@@ -102,7 +110,11 @@ if st.button("Get Price Estimate"):
         "purity": purity,
         "metal_weight_grams": metal_weight
     }
+    
+
     with st.spinner("Analyzing market comps and relaxing filters if needed..."):
+        ai_layer = "Enabled" if ENABLE_AI else "Disabled"
+
         result = run_pricing_pipeline(user_input, rapnet_token, ai_layer)
 
     # result = run_pricing_pipeline(user_input, rapnet_token, ai_layer)

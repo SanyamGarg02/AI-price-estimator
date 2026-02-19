@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 import os
 from rapnet_client import get_anchor_with_fallback
 load_dotenv()
+AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").lower()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PRICE_SOURCE = os.getenv("PRICE_SOURCE", "gemgem").lower()
 from rapnet_client import (
     build_rapnet_payload,
@@ -112,15 +114,46 @@ def build_prompt(user_input):
 # LLaVA CALL
 # ----------------------------
 def query_llava(prompt, images):
-    response = ollama.chat(
-        model="llava:13b",
-        messages=[{
-            "role": "user",
-            "content": prompt,
-            "images": images
-        }]
-    )
-    return response["message"]["content"]
+
+    # ---- USE OPENAI WHEN ENABLED ----
+    if OPENAI_API_KEY:
+        from openai import OpenAI
+        import base64
+
+        client = OpenAI(api_key=OPENAI_API_KEY)
+
+        content = [{"type": "text", "text": prompt}]
+
+        # attach images if present
+        for img in images or []:
+            if isinstance(img, bytes):
+                b64 = base64.b64encode(img).decode("utf-8")
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
+                })
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": content}],
+            temperature=0.2,
+            response_format={"type": "json_object"}
+        )
+
+        return response.choices[0].message.content
+
+    # ---- FALLBACK TO OLLAMA (optional) ----
+    else:
+        response = ollama.chat(
+            model="llava:13b",
+            messages=[{
+                "role": "user",
+                "content": prompt,
+                "images": images
+            }]
+        )
+        return response["message"]["content"]
+
 
 
 # ----------------------------
@@ -187,6 +220,17 @@ def run_pricing_pipeline(user_input, rapnet_token, ai_layer="Disabled"):
         user_input.pop("metal", None)
         user_input.pop("purity", None)
         user_input.pop("metal_weight_grams", None)
+    # ---- ENSURE MINIMUM REQUIRED FIELDS ----
+    cs = user_input["center_stone"]
+
+# Carat must exist
+    if not cs.get("carat"):
+        raise Exception("Carat is required to estimate price")
+
+    # Optional fields → set safe defaults so fallback logic works
+    cs["color"] = cs.get("color") or "G"
+    cs["clarity"] = cs.get("clarity") or "VS1"
+    cs["shape"] = cs.get("shape") or "Round"
 
     # ----------------------------
     # PRICE SOURCE SWITCH
@@ -264,26 +308,20 @@ def run_pricing_pipeline(user_input, rapnet_token, ai_layer="Disabled"):
             "low": diamond_anchor["low"],
             "high": diamond_anchor["high"]
         },
-    #     "effective_specs": effective_specs,
-    #     "base_price": base_price,
-    #     "metal_value": metal_value,
-    #     "ai_adjustment": ai_result,
-    #     "final_price": final_price
-    # }
-    "effective_specs": diamond_anchor.get("effective_specs"),
+        "effective_specs": diamond_anchor.get("effective_specs"),
 
-    "used_fallback": diamond_anchor.get("used_fallback", False),
+        "used_fallback": diamond_anchor.get("used_fallback", False),
 
-    "base_price": base_price,
+        "base_price": base_price,
 
-    "metal_value": metal_value,
+        "metal_value": metal_value,
 
-    "ai_adjustment": ai_result,
+        "ai_adjustment": ai_result,
 
-    "final_price": {
-        "low": final_price["final_price_low_usd"],
-        "high": final_price["final_price_high_usd"]
-    }
+        "final_price": {
+            "low": final_price["final_price_low_usd"],
+            "high": final_price["final_price_high_usd"]
+        }
 }
 
 
