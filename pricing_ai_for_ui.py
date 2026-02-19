@@ -220,14 +220,15 @@ def run_pricing_pipeline(user_input, rapnet_token, ai_layer="Disabled"):
         user_input.pop("metal", None)
         user_input.pop("purity", None)
         user_input.pop("metal_weight_grams", None)
+
     # ---- ENSURE MINIMUM REQUIRED FIELDS ----
     cs = user_input["center_stone"]
 
-# Carat must exist
+    # Carat must exist
     if not cs.get("carat"):
         raise Exception("Carat is required to estimate price")
 
-    # Optional fields → set safe defaults so fallback logic works
+    # Apply defaults BEFORE calling any pricing client
     cs["color"] = cs.get("color") or "G"
     cs["clarity"] = cs.get("clarity") or "VS1"
     cs["shape"] = cs.get("shape") or "Round"
@@ -239,33 +240,33 @@ def run_pricing_pipeline(user_input, rapnet_token, ai_layer="Disabled"):
     if PRICE_SOURCE == "rapnet":
 
         diamond_anchor = get_anchor_with_fallback(
-            user_input["center_stone"],
+            cs,  # ✅ pass normalized object
             rapnet_token,
             call_rapnet_api,
             compute_anchor_from_rapnet
         )
-        effective_specs = diamond_anchor.get("effective_specs")
-        # fallback_meta   = diamond_anchor.get("fallback_level")
-        # result_count    = diamond_anchor.get("result_count")
-
-        if diamond_anchor is None:
-            raise Exception("No RapNet comps found even after fallback relaxation")
-
 
     elif PRICE_SOURCE == "gemgem":
 
         diamond_anchor = get_anchor_with_fallback_gemgem(
-            user_input["center_stone"]
+            cs   # ✅ pass normalized object
         )
-        effective_specs = diamond_anchor.get("effective_specs")
-        # fallback_meta   = diamond_anchor.get("fallback_level")
-        # result_count    = diamond_anchor.get("result_count")    
-
-        if diamond_anchor is None:
-            raise Exception("No GemGem comps found even after fallback relaxation")
 
     else:
         raise Exception(f"Invalid PRICE_SOURCE: {PRICE_SOURCE}")
+
+    # ---- HANDLE NO RESULTS SAFELY ----
+    if not diamond_anchor:
+        return {
+            "error": "No comparable diamonds found even after fallback search.",
+            "diamond_anchor": None,
+            "effective_specs": None,
+            "used_fallback": False,
+            "base_price": None,
+            "metal_value": 0,
+            "ai_adjustment": {"adjustment_percent": 0},
+            "final_price": None
+        }
 
     # ---- Metal pricing ----
     metal_value = 0.0
@@ -287,12 +288,10 @@ def run_pricing_pipeline(user_input, rapnet_token, ai_layer="Disabled"):
         "high": diamond_anchor["high"] + metal_value
     }
 
-    
-
     # ---- AI adjustment ----
     if ai_layer == "Enabled":
         prompt = build_prompt(user_input)
-        raw = query_llava(prompt, user_input["images"])
+        raw = query_llava(prompt, user_input.get("images", []))
         ai_result = parse_and_clamp(raw, user_input)
     else:
         ai_result = {"adjustment_percent": 0.0}
@@ -309,20 +308,16 @@ def run_pricing_pipeline(user_input, rapnet_token, ai_layer="Disabled"):
             "high": diamond_anchor["high"]
         },
         "effective_specs": diamond_anchor.get("effective_specs"),
-
         "used_fallback": diamond_anchor.get("used_fallback", False),
-
         "base_price": base_price,
-
         "metal_value": metal_value,
-
         "ai_adjustment": ai_result,
-
         "final_price": {
             "low": final_price["final_price_low_usd"],
             "high": final_price["final_price_high_usd"]
         }
-}
+    }
+
 
 
 

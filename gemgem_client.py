@@ -40,12 +40,18 @@ def build_gemgem_payload(center_stone, colors, clarities, carat_from, carat_to):
 
 def get_anchor_with_fallback_gemgem(center_stone):
 
-    color = center_stone["color"].lower()
-    clarity = center_stone["clarity"].lower()
-    carat = center_stone["carat"]
+    color = center_stone.get("color")
+    clarity = center_stone.get("clarity")
+    carat = center_stone.get("carat")
 
-    color_idx = COLOR_ORDER.index(color)
-    clarity_idx = CLARITY_ORDER.index(clarity)
+    # only lower if present
+    color = color.lower() if color else None
+    clarity = clarity.lower() if clarity else None
+
+
+    color_idx = COLOR_ORDER.index(color) if color else None
+    clarity_idx = CLARITY_ORDER.index(clarity) if clarity else None
+
 
     carat_ranges = [
         (round(carat - 0.1, 2), round(carat + 0.1, 2), 0),   # strict
