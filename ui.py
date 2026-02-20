@@ -2,9 +2,14 @@ from dotenv import load_dotenv
 load_dotenv()
 import os
 import streamlit as st
-PRICE_SOURCE = os.getenv("PRICE_SOURCE", "gemgem").lower()
+def get_env(key, default=None):
+    # prefer OS env (local .env), else Streamlit secrets, else default
+    return os.getenv(key) or st.secrets.get(key, default)
+
+
+PRICE_SOURCE = (get_env("PRICE_SOURCE", "gemgem")).lower()
+ENABLE_AI = (get_env("ENABLE_AI", "false")).lower() == "true"
 USE_RAPNET = PRICE_SOURCE == "rapnet"
-ENABLE_AI = os.getenv("ENABLE_AI", "false").lower() == "true"
 from pricing_ai_for_ui import run_pricing_pipeline  # your main function
 SHAPES = [
     "Round", "Pear", "Princess", "Marquise", "Oval",

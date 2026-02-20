@@ -6,8 +6,9 @@ import os
 from rapnet_client import get_anchor_with_fallback
 load_dotenv()
 AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").lower()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-PRICE_SOURCE = os.getenv("PRICE_SOURCE", "gemgem").lower()
+PRICE_SOURCE = (get_env("PRICE_SOURCE", "gemgem")).lower()
+ENABLE_AI = (get_env("ENABLE_AI", "false")).lower() == "true"
+USE_RAPNET = PRICE_SOURCE == "rapnet"
 from rapnet_client import (
     build_rapnet_payload,
     call_rapnet_api,
