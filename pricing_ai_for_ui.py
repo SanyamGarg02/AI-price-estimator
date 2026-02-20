@@ -9,6 +9,7 @@ AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").lower()
 PRICE_SOURCE = (get_env("PRICE_SOURCE", "gemgem")).lower()
 ENABLE_AI = (get_env("ENABLE_AI", "false")).lower() == "true"
 USE_RAPNET = PRICE_SOURCE == "rapnet"
+OPENAI_API_KEY = get_env("OPENAI_API_KEY")
 from rapnet_client import (
     build_rapnet_payload,
     call_rapnet_api,
