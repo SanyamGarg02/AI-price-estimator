@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 import os
 from rapnet_client import get_anchor_with_fallback
 load_dotenv()
-
+import streamlit as st
 def get_env(key, default=None):
     return os.getenv(key) or st.secrets.get(key, default)
 AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").lower()
