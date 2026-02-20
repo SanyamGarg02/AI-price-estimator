@@ -5,6 +5,9 @@ from dotenv import load_dotenv
 import os
 from rapnet_client import get_anchor_with_fallback
 load_dotenv()
+
+def get_env(key, default=None):
+    return os.getenv(key) or st.secrets.get(key, default)
 AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").lower()
 PRICE_SOURCE = (get_env("PRICE_SOURCE", "gemgem")).lower()
 ENABLE_AI = (get_env("ENABLE_AI", "false")).lower() == "true"
