@@ -125,7 +125,7 @@ def build_prompt(user_input):
         "Follow this reasoning order internally:\n"
         "1. Determine the condition adjustment range.\n"
         "2. Determine the brand adjustment if applicable.\n"
-        "3. Add the adjustments conservatively.\n"
+        "3. Add the adjustments conservatively.(condition adjustment + brand adjustment)\n"
         "IMPORTANT:\n"
         "- Brand must always remain a secondary adjustment factor.\n"
 
