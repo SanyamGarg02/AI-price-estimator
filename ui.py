@@ -82,7 +82,14 @@ condition = st.selectbox(
 
 
 metal = purity = metal_weight = None
-
+brand = st.text_input(
+    "Brand (optional)",
+    placeholder="e.g. Cartier, Tiffany, None"
+)
+brand_proof = st.selectbox(
+    "Brand proof available?",
+    ["No", "Yes"]
+)
 
 if jewelry_type == "Diamond Jewelry":
     st.subheader("Jewelry Details")
@@ -113,7 +120,9 @@ if st.button("Get Price Estimate"):
         "condition": condition,
         "metal": metal,
         "purity": purity,
-        "metal_weight_grams": metal_weight
+        "metal_weight_grams": metal_weight,
+        "brand": brand if brand else None,
+        "brand_proof": brand_proof if brand_proof else None
     }
     
 

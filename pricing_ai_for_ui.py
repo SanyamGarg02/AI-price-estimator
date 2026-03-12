@@ -62,9 +62,21 @@ def build_prompt(user_input):
         "IMPORTANT CONSTRAINTS:\n"
         "- If condition is 'Excellent' or 'Like New', adjustment_percent MUST be >= 0.\n"
         "- Missing information MUST NOT cause a negative adjustment.\n"
+        "- Brand may be considered as a bounded adjustment factor.\n"
+        "- Brand MUST NOT become the primary pricing driver.\n"
+        "- Brand must not produce aggressive premium assumptions without strong supporting evidence.\n"
+        "- If brand information is uncertain or unverified, treat it as neutral.\n"
+        "- Follow the OPS adjustment rules strictly.\n"
         "- You MUST respond with ONLY valid JSON.\n"
         "- Do NOT include explanations or prose.\n"
         "- If unsure, still return JSON with best-guess values."
+    )
+    lines.append(
+        "Brand adjustment rule:\n"
+        "- If brand is provided AND brand proof is Yes → use 'top_resale_brand_with_proof'.\n"
+        "- If brand is provided AND brand proof is No → use 'top_resale_brand_without_proof'.\n"
+        "- If no brand → use 'unbranded_or_unknown'.\n"
+        "- Brand must not become the primary pricing driver."
     )
 
     lines.append(
@@ -88,6 +100,7 @@ def build_prompt(user_input):
 
     lines.append("OTHER DETAILS:")
     lines.append(f"- Brand: {user_input.get('brand', 'Unbranded')}")
+    lines.append(f"- Brand proof available: {user_input.get('brand_proof', 'No')}")
     lines.append(f"- Condition: {user_input.get('condition', 'Unknown')}")
 
     if user_input.get("jewelry_type") != "Loose Diamond":
@@ -108,8 +121,15 @@ def build_prompt(user_input):
 
     lines.append(
         "TASK:\n"
-        "Choose a TOTAL adjustment percentage.\n"
-        "Return JSON ONLY."
+        "Determine the final adjustment_percent using the OPS adjustment rules.\n\n"
+        "Follow this reasoning order internally:\n"
+        "1. Determine the condition adjustment range.\n"
+        "2. Determine the brand adjustment if applicable.\n"
+        "3. Add the adjustments conservatively.\n"
+        "IMPORTANT:\n"
+        "- Brand must always remain a secondary adjustment factor.\n"
+
+        "Return ONLY JSON in the specified format."
     )
 
     return "\n\n".join(lines)
