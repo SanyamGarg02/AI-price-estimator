@@ -1,5 +1,7 @@
 import requests
 import os
+import json
+import time
 COLOR_ORDER = ["D","E","F","G","H","I","J","K","L","M"]
 CLARITY_ORDER = ["IF","VVS1","VVS2","VS1","VS2","SI1","SI2","SI3","I1","I2","I3"]
 
@@ -7,13 +9,134 @@ RAPNET_URL = "https://technet.rapnetapis.com/instant-inventory/api/Diamonds"
 
 
 TIMEOUT_SECONDS = 15
+MIN_COMPARABLES_REQUIRED = 3
+MIN_RESULTS_TO_KEEP_GIA_ONLY = 5
+LABS_PRIMARY = ["GIA"]
+LABS_FALLBACK = ["GIA", "IGI", "AGS", "EGL", "HRD"]
+THIN_DATA_DISCOUNT_BY_COUNT = {
+    1: 0.55,
+    2: 0.62,
+    3: 0.70,
+    4: 0.78,
+    5: 0.85,
+    6: 0.92,
+    7: 0.92
+}
+THIN_DATA_NO_DISCOUNT_MIN_COUNT = 8
+RAPNET_CACHE_TTL_SECONDS = 60 * 60
+_RAPNET_CACHE = {}
 
-def build_rapnet_payload(center_stone, color_from=None, color_to=None, clarity_from=None, clarity_to=None, carat_from=None, carat_to=None,fluoro=None):
+
+def _to_float(value):
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _get_color_index(value):
+    if not value:
+        return None
+    color = str(value).upper().strip()
+    return COLOR_ORDER.index(color) if color in COLOR_ORDER else None
+
+
+def _get_clarity_index(value):
+    if not value:
+        return None
+    clarity = str(value).upper().strip()
+    return CLARITY_ORDER.index(clarity) if clarity in CLARITY_ORDER else None
+
+
+def _extract_diamond_color(d):
+    return (
+        d.get("color")
+        or d.get("Color")
+        or d.get("diamond_color")
+    )
+
+
+def _extract_diamond_clarity(d):
+    return (
+        d.get("clarity")
+        or d.get("Clarity")
+        or d.get("diamond_clarity")
+    )
+
+
+def _extract_diamond_carat(d):
+    return (
+        _to_float(d.get("size"))
+        or _to_float(d.get("carat"))
+        or _to_float(d.get("carat_weight"))
+    )
+
+
+def _compute_similarity_weight(diamond, target):
+    """
+    Similarity weighting so relaxed comps influence anchor less.
+    Higher is better; minimum floor keeps sparse data usable.
+    """
+    target_carat = _to_float(target.get("carat"))
+    target_color_idx = _get_color_index(target.get("color"))
+    target_clarity_idx = _get_clarity_index(target.get("clarity"))
+
+    comp_carat = _extract_diamond_carat(diamond)
+    comp_color_idx = _get_color_index(_extract_diamond_color(diamond))
+    comp_clarity_idx = _get_clarity_index(_extract_diamond_clarity(diamond))
+
+    carat_penalty = 0.0
+    if target_carat is not None and comp_carat is not None:
+        carat_penalty = abs(comp_carat - target_carat) / max(target_carat, 0.01)
+
+    color_penalty = 0.0
+    if target_color_idx is not None and comp_color_idx is not None:
+        color_penalty = abs(comp_color_idx - target_color_idx) * 0.12
+
+    clarity_penalty = 0.0
+    if target_clarity_idx is not None and comp_clarity_idx is not None:
+        clarity_penalty = abs(comp_clarity_idx - target_clarity_idx) * 0.12
+
+    raw = 1.0 - carat_penalty - color_penalty - clarity_penalty
+    return max(0.15, min(1.0, raw))
+
+
+def _weighted_percentile_price(weighted_prices, q):
+    """
+    weighted_prices: list[(price, weight)] sorted by price asc.
+    q in [0,1].
+    """
+    if not weighted_prices:
+        return None
+    total_w = sum(w for _, w in weighted_prices)
+    if total_w <= 0:
+        return None
+
+    threshold = total_w * q
+    running = 0.0
+    for price, weight in weighted_prices:
+        running += weight
+        if running >= threshold:
+            return price
+    return weighted_prices[-1][0]
+
+def build_rapnet_payload(
+    center_stone,
+    color_from=None,
+    color_to=None,
+    clarity_from=None,
+    clarity_to=None,
+    carat_from=None,
+    carat_to=None,
+    fluoro=None,
+    labs=None
+):
     shape = center_stone.get("shape")
     carat = center_stone.get("carat")
     color = center_stone.get("color")
     clarity = center_stone.get("clarity")
-    fluoro = center_stone.get("fluorescence")
+    if fluoro is None:
+        fluoro = center_stone.get("fluorescence")
 
     # fallback defaults
     if carat_from is None:
@@ -25,7 +148,7 @@ def build_rapnet_payload(center_stone, color_from=None, color_to=None, clarity_f
         color_from = color
     if color_to is None:
         color_to = color
-    if fluoro and fluoro.lower() != "none":
+    if fluoro and str(fluoro).lower() not in ("none", "unknown"):
         fluorescence_filter = [fluoro]
     else:
         fluorescence_filter = None
@@ -47,8 +170,7 @@ def build_rapnet_payload(center_stone, color_from=None, color_to=None, clarity_f
                 "color_to": color_to,
                 "clarity_from": clarity_from,
                 "clarity_to": clarity_to,
-                "labs": ["GIA"],
-                "fluorescence_intensities": fluorescence_filter or ["None"],
+                "labs": labs or LABS_PRIMARY,
                 "page_number": "1",
                 "page_size": "50",
                 "sort_by": "Price",
@@ -56,72 +178,117 @@ def build_rapnet_payload(center_stone, color_from=None, color_to=None, clarity_f
             }
         }
     }
+    # Do not force fluorescence=None filter when value is unknown/missing.
+    if fluorescence_filter:
+        payload["request"]["body"]["fluorescence_intensities"] = fluorescence_filter
     return payload
+
+    
 def get_anchor_with_fallback(center_stone, rapnet_token,call_rapnet_api, compute_anchor):
-    color = center_stone.get("color")
-    clarity = center_stone.get("clarity")
+    color = (center_stone.get("color") or "G").upper()
+    clarity = (center_stone.get("clarity") or "VS1").upper()
     carat = center_stone.get("carat")
     fluorescence = center_stone.get("fluorescence")
 
     # indexes
-    color_idx = COLOR_ORDER.index(color)
-    clarity_idx = CLARITY_ORDER.index(clarity)
+    color_idx = COLOR_ORDER.index(color) if color in COLOR_ORDER else COLOR_ORDER.index("G")
+    clarity_idx = CLARITY_ORDER.index(clarity) if clarity in CLARITY_ORDER else CLARITY_ORDER.index("VS1")
 
-    carat_ranges = [
-        (carat - 0.1, carat + 0.1),
-        (carat - 0.5, carat + 0.5)
+    search_levels = [
+        # strict search
+        {"carat_delta": 0.1, "color_expand": [0], "clarity_expand": [0], "is_regular": False},
+        # slight relaxation (smaller than regular)
+        {"carat_delta": 0.2, "color_expand": [1], "clarity_expand": [1], "is_regular": False},
+        # regular relaxation
+        {"carat_delta": 0.5, "color_expand": [0, 1, 2], "clarity_expand": [0, 1, 2], "is_regular": True},
     ]
+    best_attempt = None
 
-    for cr in carat_ranges:
-        for color_expand in range(0, 3):
-            for clarity_expand in range(0, 3):
+    for level in search_levels:
+        carat_delta = level["carat_delta"]
+        carat_from = round(carat - carat_delta, 2)
+        carat_to = round(carat + carat_delta, 2)
+
+        for color_expand in level["color_expand"]:
+            for clarity_expand in level["clarity_expand"]:
                 c_from = COLOR_ORDER[max(0, color_idx - color_expand)]
                 c_to   = COLOR_ORDER[min(len(COLOR_ORDER)-1, color_idx + color_expand)]
 
                 cl_from = CLARITY_ORDER[max(0, clarity_idx - clarity_expand)]
                 cl_to   = CLARITY_ORDER[min(len(CLARITY_ORDER)-1, clarity_idx + clarity_expand)]
 
-                payload = build_rapnet_payload(
-                    center_stone,
-                    color_from=c_from,
-                    color_to=c_to,
-                    clarity_from=cl_from,
-                    clarity_to=cl_to,
-                    carat_from=round(cr[0],2),
-                    carat_to=round(cr[1],2),
-                    fluoro=fluorescence
-                )
+                lab_sets = [LABS_PRIMARY, LABS_FALLBACK]
+                for current_labs in lab_sets:
+                    payload = build_rapnet_payload(
+                        center_stone,
+                        color_from=c_from,
+                        color_to=c_to,
+                        clarity_from=cl_from,
+                        clarity_to=cl_to,
+                        carat_from=carat_from,
+                        carat_to=carat_to,
+                        fluoro=fluorescence,
+                        labs=current_labs
+                    )
 
-                try:
-                    res = call_rapnet_api(payload, rapnet_token)
-                    anchor = compute_anchor(res)
+                    try:
+                        res = call_rapnet_api(payload, rapnet_token)
+                        anchor_data = compute_anchor(
+                            res,
+                            target_stone=center_stone,
+                            search_meta={
+                                "carat_delta": carat_delta,
+                                "color_expand": color_expand,
+                                "clarity_expand": clarity_expand,
+                                "labs": current_labs,
+                            }
+                        )
 
-                    if anchor is not None:
+                        if anchor_data is not None:
+                            diamonds = res.get("response", {}).get("body", {}).get("diamonds", [])
+                            comparable_count = len(diamonds)
+                            anchor = anchor_data.get("anchor", anchor_data)
 
-                        return {
-                            "low": anchor["low"],
-                            "high": anchor["high"],
+                            candidate = {
+                                "low": anchor["low"],
+                                "high": anchor["high"],
+                                "comparables": diamonds[:5],
+                                "count": comparable_count,
+                                "effective_specs": {
+                                    "carat_min": carat_from,
+                                    "carat_max": carat_to,
+                                    "color": [c_from, c_to],
+                                    "clarity": [cl_from, cl_to],
+                                    "shape": center_stone.get("shape"),
+                                    "cut": center_stone.get("cut"),
+                                    "labs": current_labs
+                                },
+                                "confidence": anchor_data.get("confidence"),
+                                "fallback_expansion": anchor_data.get("fallback_expansion"),
+                                "used_fallback": (
+                                    carat_delta > 0.1
+                                    or color_expand > 0
+                                    or clarity_expand > 0
+                                    or current_labs != LABS_PRIMARY
+                                ),
+                                "insufficient_comparables": comparable_count < MIN_COMPARABLES_REQUIRED,
+                            }
 
-                            "effective_specs": {
-                            "carat_min": round(cr[0], 2),
-                            "carat_max": round(cr[1], 2),
-                            "color": [c_from, c_to],
-                            "clarity": [cl_from, cl_to],
-                            "shape": center_stone.get("shape"),
-                            "cut": center_stone.get("cut"),
-                            "lab": payload["request"]["body"]["labs"][0] if payload["request"]["body"].get("labs") else None
-            },
+                            if best_attempt is None or comparable_count > best_attempt["count"]:
+                                best_attempt = candidate
 
-            "result_count": anchor.get("result_count", 0),
+                            if comparable_count >= MIN_COMPARABLES_REQUIRED:
+                                return candidate
 
-            "used_fallback": (color_expand > 0 or clarity_expand > 0 or cr != carat_ranges[0])
-    }
+                            # If GIA-only already has a healthy sample, skip broader lab query.
+                            if current_labs == LABS_PRIMARY and comparable_count >= MIN_RESULTS_TO_KEEP_GIA_ONLY:
+                                break
 
-                except Exception as e:
-                    print("ERROR in anchor compute:", e)
-                    continue
+                    except Exception as e:
+                        print("ERROR in anchor compute:", e)
+                        continue
 
-    return None
+    return best_attempt
 
 
 
@@ -131,6 +298,16 @@ def call_rapnet_api(payload, rapnet_token):
     print("\n================ RAPNET REQUEST ================")
     print(payload)
     print("================================================\n")
+
+    cache_key = json.dumps(
+        {"payload": payload, "token_suffix": str(rapnet_token)[-8:]},
+        sort_keys=True,
+        default=str
+    )
+    now = time.time()
+    cached = _RAPNET_CACHE.get(cache_key)
+    if cached and now < cached["expires_at"]:
+        return cached["data"]
 
     headers = {
         "Authorization": f"Bearer {rapnet_token}",
@@ -145,25 +322,76 @@ def call_rapnet_api(payload, rapnet_token):
     )
 
     response.raise_for_status()
-    return response.json()
+    data = response.json()
+    if len(_RAPNET_CACHE) > 300:
+        _RAPNET_CACHE.clear()
+    _RAPNET_CACHE[cache_key] = {"data": data, "expires_at": now + RAPNET_CACHE_TTL_SECONDS}
+    return data
 
 
-def compute_anchor_from_rapnet(rapnet_response):
+def _confidence_label(score):
+    if score >= 0.8:
+        return "high"
+    if score >= 0.6:
+        return "medium"
+    return "low"
+
+
+def compute_anchor_from_rapnet(rapnet_response, target_stone=None, search_meta=None):
+
     diamonds = rapnet_response["response"]["body"]["diamonds"]
 
-    prices = [
-        d["total_sales_price"]
-        for d in diamonds
-        if d.get("total_sales_price") is not None
-    ]
+    weighted_prices = []
+    for d in diamonds:
+        price = _to_float(d.get("total_sales_price"))
+        if price is None:
+            continue
+        weight = _compute_similarity_weight(d, target_stone or {}) if target_stone else 1.0
+        weighted_prices.append((price, weight))
 
-    if len(prices) < 1:
+    if len(weighted_prices) < 1:
         return None
 
-    prices.sort()
+    weighted_prices.sort(key=lambda x: x[0])
+    p25 = _weighted_percentile_price(weighted_prices, 0.25)
+    p75 = _weighted_percentile_price(weighted_prices, 0.75)
+    if p25 is None or p75 is None:
+        return None
+
+    count = len(weighted_prices)
+    discount_multiplier = 1.0
+    if count < THIN_DATA_NO_DISCOUNT_MIN_COUNT:
+        discount_multiplier = THIN_DATA_DISCOUNT_BY_COUNT.get(count, 0.55)
+
+    anchor = {
+        "low": round(p25 * discount_multiplier, 2),
+        "high": round(p75 * discount_multiplier, 2)
+    }
+
+    avg_weight = sum(w for _, w in weighted_prices) / count if count else 0.0
+    carat_delta = (search_meta or {}).get("carat_delta", 0.1)
+    color_expand = (search_meta or {}).get("color_expand", 0)
+    clarity_expand = (search_meta or {}).get("clarity_expand", 0)
+    lab_broadened = (search_meta or {}).get("labs", LABS_PRIMARY) != LABS_PRIMARY
+    expansion_penalty = (max(0.0, carat_delta - 0.1) * 0.8) + (color_expand * 0.08) + (clarity_expand * 0.08) + (0.08 if lab_broadened else 0.0)
+    thin_data_penalty = 0.0 if discount_multiplier == 1.0 else (1.0 - discount_multiplier) * 0.5
+    confidence_score = max(0.05, min(1.0, avg_weight - expansion_penalty - thin_data_penalty))
 
     return {
-        "low": round(prices[int(len(prices) * 0.25)], 2),
-        "high": round(prices[int(len(prices) * 0.75)], 2),
-        "result_count": len(prices)
+        "anchor": anchor,
+        "comparables": diamonds[:5],  # store top comps
+        "count": len(diamonds),
+        "confidence": {
+            "score": round(confidence_score, 2),
+            "label": _confidence_label(confidence_score),
+            "avg_similarity_weight": round(avg_weight, 2),
+            "thin_data_discount_multiplier": round(discount_multiplier, 3),
+            "weighted_method": True
+        },
+        "fallback_expansion": {
+            "carat_delta": carat_delta,
+            "color_expand": color_expand,
+            "clarity_expand": clarity_expand,
+            "lab_broadened": lab_broadened
+        }
     }
