@@ -131,6 +131,25 @@ def _confidence_label(score):
         return "medium"
     return "low"
 
+
+def _apply_thin_data_discount_floor(base_multiplier, count, avg_weight, carat_step, expand):
+    """
+    Reduce over-discounting for high-similarity strict/slight searches.
+    """
+    if count > 2 or avg_weight < 0.8:
+        return base_multiplier
+
+    is_strict = (carat_step == 0 and expand == 0)
+    is_slight = (carat_step == 1 and expand <= 1)
+
+    if is_strict:
+        floor = 0.85 if count == 1 else 0.90
+        return max(base_multiplier, floor)
+    if is_slight:
+        floor = 0.80 if count == 1 else 0.86
+        return max(base_multiplier, floor)
+    return base_multiplier
+
 def build_gemgem_payload(center_stone, colors, clarities, carat_from, carat_to):
 
     params = []
@@ -284,13 +303,20 @@ def get_anchor_with_fallback_gemgem(center_stone):
                     )
 
                     count = len(weighted_prices)
+                    avg_weight = sum(w for _, w in weighted_prices) / count if count else 0.0
                     discount_multiplier = 1.0
                     if count < THIN_DATA_NO_DISCOUNT_MIN_COUNT:
                         discount_multiplier = THIN_DATA_DISCOUNT_BY_COUNT.get(count, 0.55)
+                    discount_multiplier = _apply_thin_data_discount_floor(
+                        discount_multiplier,
+                        count,
+                        avg_weight,
+                        carat_step,
+                        expand
+                    )
 
                     low = round(p25 * discount_multiplier, 2)
                     high = round(p75 * discount_multiplier, 2)
-                    avg_weight = sum(w for _, w in weighted_prices) / count if count else 0.0
                     expansion_penalty = (max(0.0, level["carat_delta"] - 0.1) * 0.8) + (expand * 0.08) + (expand * 0.08)
                     thin_data_penalty = 0.0 if discount_multiplier == 1.0 else (1.0 - discount_multiplier) * 0.5
                     confidence_score = max(0.05, min(1.0, avg_weight - expansion_penalty - thin_data_penalty))

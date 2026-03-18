@@ -337,6 +337,44 @@ def _confidence_label(score):
     return "low"
 
 
+def _apply_thin_data_discount_floor(
+    base_multiplier,
+    count,
+    avg_weight,
+    carat_delta,
+    color_expand,
+    clarity_expand,
+    lab_broadened
+):
+    """
+    Reduce over-discounting for high-quality, low-relaxation thin-data cases.
+    """
+    if count > 2 or avg_weight < 0.8:
+        return base_multiplier
+
+    is_strict = (
+        carat_delta <= 0.1
+        and color_expand == 0
+        and clarity_expand == 0
+        and not lab_broadened
+    )
+    is_slight = (
+        not is_strict
+        and carat_delta <= 0.2
+        and color_expand <= 1
+        and clarity_expand <= 1
+        and not lab_broadened
+    )
+
+    if is_strict:
+        floor = 0.85 if count == 1 else 0.90
+        return max(base_multiplier, floor)
+    if is_slight:
+        floor = 0.80 if count == 1 else 0.86
+        return max(base_multiplier, floor)
+    return base_multiplier
+
+
 def compute_anchor_from_rapnet(rapnet_response, target_stone=None, search_meta=None):
 
     diamonds = rapnet_response["response"]["body"]["diamonds"]
@@ -363,20 +401,30 @@ def compute_anchor_from_rapnet(rapnet_response, target_stone=None, search_meta=N
         return None
 
     count = len(weighted_prices)
+    carat_delta = (search_meta or {}).get("carat_delta", 0.1)
+    color_expand = (search_meta or {}).get("color_expand", 0)
+    clarity_expand = (search_meta or {}).get("clarity_expand", 0)
+    lab_broadened = (search_meta or {}).get("labs", LABS_PRIMARY) != LABS_PRIMARY
+    avg_weight = sum(w for _, w in weighted_prices) / count if count else 0.0
+
     discount_multiplier = 1.0
     if count < THIN_DATA_NO_DISCOUNT_MIN_COUNT:
         discount_multiplier = THIN_DATA_DISCOUNT_BY_COUNT.get(count, 0.55)
+    discount_multiplier = _apply_thin_data_discount_floor(
+        discount_multiplier,
+        count,
+        avg_weight,
+        carat_delta,
+        color_expand,
+        clarity_expand,
+        lab_broadened
+    )
 
     anchor = {
         "low": round(p25 * discount_multiplier, 2),
         "high": round(p75 * discount_multiplier, 2)
     }
 
-    avg_weight = sum(w for _, w in weighted_prices) / count if count else 0.0
-    carat_delta = (search_meta or {}).get("carat_delta", 0.1)
-    color_expand = (search_meta or {}).get("color_expand", 0)
-    clarity_expand = (search_meta or {}).get("clarity_expand", 0)
-    lab_broadened = (search_meta or {}).get("labs", LABS_PRIMARY) != LABS_PRIMARY
     expansion_penalty = (max(0.0, carat_delta - 0.1) * 0.8) + (color_expand * 0.08) + (clarity_expand * 0.08) + (0.08 if lab_broadened else 0.0)
     thin_data_penalty = 0.0 if discount_multiplier == 1.0 else (1.0 - discount_multiplier) * 0.5
     confidence_score = max(0.05, min(1.0, avg_weight - expansion_penalty - thin_data_penalty))
