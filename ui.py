@@ -112,6 +112,30 @@ def _fmt_usd(value):
         return "N/A"
 
 
+def _friendly_error_message(error_text):
+    msg = str(error_text or "").strip()
+    lower = msg.lower()
+
+    if "carat is required" in lower:
+        return "Please add either a center stone carat or at least one valid side-stone group to continue."
+    if "please provide either center stone carat" in lower:
+        return "Please add either a center stone carat or at least one valid side-stone group to continue."
+    if "rapnet token is required" in lower:
+        return "RapNet access token is missing. Please add a valid token and try again."
+    if "no comparable diamonds found" in lower:
+        return "We could not find enough comparable diamonds right now. Please adjust specs slightly and retry."
+    if "estimate confidence is too low" in lower:
+        return "The estimate confidence is currently low. Please request manual review for this item."
+    if "invalid price_source" in lower:
+        return "Pricing source is not configured correctly. Please contact support."
+    if "failed to resolve" in lower or "max retries exceeded" in lower or "connection" in lower:
+        return "Market pricing service is temporarily unavailable. Please try again in a moment."
+    if "timed out" in lower or "timeout" in lower:
+        return "The pricing request timed out. Please try again."
+
+    return "Something went wrong while estimating price. Please retry, and if it continues, contact support."
+
+
 def _render_min_max_block(title, low, high):
     st.markdown(f"**{title}**")
     col1, col2 = st.columns(2)
@@ -121,7 +145,7 @@ def _render_min_max_block(title, low, high):
 
 def _render_final_result_ui(result):
     if result.get("error"):
-        st.error(result["error"])
+        st.error(_friendly_error_message(result["error"]))
         return
 
     center = result.get("diamond_anchor") or {}
@@ -179,6 +203,30 @@ def _render_final_result_ui(result):
             st.dataframe(breakdown, hide_index=True, use_container_width=True)
         else:
             st.write("No side stones added.")
+
+        side_comp_groups = result.get("side_stones_comparables", [])
+        for group in side_comp_groups:
+            if group.get("price_source") != "market_comparables":
+                continue
+            comp_count = int(group.get("comparable_count") or 0)
+            if comp_count <= 0:
+                continue
+            group_idx = group.get("index")
+            with st.expander(f"Side Stone Group {group_idx} Comparables ({comp_count})"):
+                rows = []
+                for comp in group.get("comparables", []):
+                    rows.append(_extract_comparable_specs(comp))
+                if rows:
+                    st.dataframe(
+                        rows,
+                        hide_index=True,
+                        use_container_width=True,
+                        column_config={
+                            "Product URL": st.column_config.LinkColumn("Product URL")
+                        }
+                    )
+                else:
+                    st.write("No comparable references available for this side-stone group.")
 
     with st.expander("Metal Details"):
         _render_min_max_block("Metal Value", metal_value, metal_value)
@@ -540,8 +588,10 @@ if st.button("Get Price Estimate"):
 
     with st.spinner("Analyzing market comps and relaxing filters if needed..."):
         ai_layer = "Enabled" if ENABLE_AI else "Disabled"
-
-        result = run_pricing_pipeline(user_input, rapnet_token, ai_layer)
+        try:
+            result = run_pricing_pipeline(user_input, rapnet_token, ai_layer)
+        except Exception as exc:
+            result = {"error": _friendly_error_message(exc)}
 
     # result = run_pricing_pipeline(user_input, rapnet_token, ai_layer)
     eff = result.get("effective_specs")

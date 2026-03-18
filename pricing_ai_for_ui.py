@@ -90,8 +90,14 @@ MELEE_PER_CARAT_TABLE = [
     {"max_per_stone_carat": 0.01, "low": 260, "high": 380},
     {"max_per_stone_carat": 0.02, "low": 400, "high": 600},
     {"max_per_stone_carat": 0.03, "low": 550, "high": 800},
+    {"max_per_stone_carat": 0.04, "low": 700, "high": 980},
+    {"max_per_stone_carat": 0.05, "low": 850, "high": 1200},
+    {"max_per_stone_carat": 0.06, "low": 1000, "high": 1450},
+    {"max_per_stone_carat": 0.07, "low": 1150, "high": 1650},
+    {"max_per_stone_carat": 0.08, "low": 1300, "high": 1850},
+    {"max_per_stone_carat": 0.09, "low": 1450, "high": 2100},
 ]
-MELEE_THRESHOLD_PER_STONE_CARAT = 0.03
+MELEE_THRESHOLD_PER_STONE_CARAT = 0.09
 CONFIDENCE_SHOW_NORMALLY_MIN = 0.75
 CONFIDENCE_WARN_MIN = 0.60
 CONFIDENCE_REVIEW_MIN = 0.45
@@ -422,6 +428,7 @@ def _compute_side_stones_value(side_stones, rapnet_token):
     total_low = 0.0
     total_high = 0.0
     details = []
+    comparable_groups = []
 
     for idx, stone in enumerate(side_stones, start=1):
         stone_type = (stone.get("stone_type") or "Diamond").strip().lower()
@@ -460,11 +467,13 @@ def _compute_side_stones_value(side_stones, rapnet_token):
             side_low = float(anchor["low"]) * quantity
             side_high = float(anchor["high"]) * quantity
             price_source_used = "market_comparables"
+            group_comparables = anchor_result.get("comparables", [])
         else:
             melee_band = _lookup_melee_price_per_carat(per_stone_carat)
             side_low = melee_band["low"] * total_carat
             side_high = melee_band["high"] * total_carat
             price_source_used = "melee_fallback_table"
+            group_comparables = []
 
         side_low = round(side_low, 2)
         side_high = round(side_high, 2)
@@ -481,13 +490,26 @@ def _compute_side_stones_value(side_stones, rapnet_token):
             "clarity": stone_query["clarity"],
             "cut": stone_query.get("cut"),
             "price_source": price_source_used,
+            "comparable_count": len(group_comparables),
             "per_diamond_value_low": round(side_low / quantity, 2),
             "per_diamond_value_high": round(side_high / quantity, 2),
             "estimated_value_low": side_low,
             "estimated_value_high": side_high
         })
 
-    return {"low": round(total_low, 2), "high": round(total_high, 2), "details": details}
+        comparable_groups.append({
+            "index": idx,
+            "price_source": price_source_used,
+            "comparable_count": len(group_comparables),
+            "comparables": group_comparables
+        })
+
+    return {
+        "low": round(total_low, 2),
+        "high": round(total_high, 2),
+        "details": details,
+        "comparable_groups": comparable_groups
+    }
 
 
 # ----------------------------
@@ -662,6 +684,7 @@ def run_pricing_pipeline(user_input, rapnet_token, ai_layer="Disabled"):
             "high": side_stone_value["high"]
         },
         "side_stones_breakdown": side_stone_value["details"],
+        "side_stones_comparables": side_stone_value.get("comparable_groups", []),
         "ai_adjustment": ai_result,
         "brand_policy_key": user_input.get("brand_policy_key"),
         "confidence_action": confidence_action,
