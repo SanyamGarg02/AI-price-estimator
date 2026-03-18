@@ -487,6 +487,15 @@ if st.button("Get Price Estimate"):
         st.error(f"Side Stone Group {invalid_side_stone}: quantity and total carat weight are required.")
         st.stop()
 
+    has_center_stone = float(carat or 0.0) > 0
+    has_valid_side_stones = any(
+        float(ss.get("total_carat_weight") or 0.0) > 0 and int(ss.get("quantity") or 0) > 0
+        for ss in side_stones_form
+    )
+    if not has_center_stone and not has_valid_side_stones:
+        st.error("Please provide either center stone carat or at least one valid side-stone group.")
+        st.stop()
+
     non_diamond_group = next(
         (
             idx + 1 for idx, ss in enumerate(side_stones_form)

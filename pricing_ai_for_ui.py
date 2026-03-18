@@ -153,15 +153,19 @@ def build_prompt(user_input):
     lines.append(f"JEWELRY TYPE: {user_input.get('jewelry_type')}")
 
     cs = user_input.get("center_stone", {})
+    cs_carat = float(cs.get("carat") or 0.0)
     lines.append("CENTER STONE:")
-    lines.append(f"- Shape: {cs.get('shape', 'Unknown')}")
-    lines.append(f"- Carat: {cs.get('carat', 'Unknown')}")
-    lines.append(f"- Color: {cs.get('color', 'Unknown')}")
-    lines.append(f"- Clarity: {cs.get('clarity', 'Unknown')}")
-    lines.append(f"- Cut: {cs.get('cut', 'Unknown')}")
-    lines.append(f"- Polish: {cs.get('polish', 'Unknown')}")
-    lines.append(f"- Symmetry: {cs.get('symmetry', 'Unknown')}")
-    lines.append(f"- Fluorescence: {cs.get('fluorescence', 'Unknown')}")
+    if cs_carat > 0:
+        lines.append(f"- Shape: {cs.get('shape', 'Unknown')}")
+        lines.append(f"- Carat: {cs.get('carat', 'Unknown')}")
+        lines.append(f"- Color: {cs.get('color', 'Unknown')}")
+        lines.append(f"- Clarity: {cs.get('clarity', 'Unknown')}")
+        lines.append(f"- Cut: {cs.get('cut', 'Unknown')}")
+        lines.append(f"- Polish: {cs.get('polish', 'Unknown')}")
+        lines.append(f"- Symmetry: {cs.get('symmetry', 'Unknown')}")
+        lines.append(f"- Fluorescence: {cs.get('fluorescence', 'Unknown')}")
+    else:
+        lines.append("- No center stone in this piece (side-stones-only design).")
 
     lines.append("OTHER DETAILS:")
     lines.append(f"- Brand: {user_input.get('brand', 'Unbranded')}")
@@ -274,15 +278,20 @@ def generate_why_this_price_statement(user_input, result_payload):
         client = OpenAI(api_key=OPENAI_API_KEY)
 
         cs = user_input.get("center_stone", {})
+        cs_carat = float(cs.get("carat") or 0.0)
         conf = result_payload.get("anchor_confidence") or {}
         ai_adj = result_payload.get("ai_adjustment") or {}
         key_drivers = ", ".join((ai_adj.get("key_drivers") or [])[:2]) or "spec match and market comps"
+        if cs_carat > 0:
+            specs_line = f"Specs: {cs.get('shape')} {cs.get('carat')}ct {cs.get('color')} {cs.get('clarity')}.\n"
+        else:
+            specs_line = "Specs: side-stones-only diamond jewelry (no center stone).\n"
         prompt = (
             "Write 1 short, persuasive pricing justification (max 24 words). "
             "Use reassuring, emotionally confident language. No hype, no guarantees.\n"
             f"Must include this exact range once: {range_text}.\n"
             "Do NOT mention any single dollar number outside that range.\n"
-            f"Specs: {cs.get('shape')} {cs.get('carat')}ct {cs.get('color')} {cs.get('clarity')}.\n"
+            f"{specs_line}"
             f"Comparables: {result_payload.get('comparable_count', 0)}.\n"
             f"Confidence: {conf.get('label', 'N/A')}.\n"
             f"Adjustment: {ai_adj.get('adjustment_percent', 0)}%.\n"
@@ -493,40 +502,62 @@ def run_pricing_pipeline(user_input, rapnet_token, ai_layer="Disabled"):
         user_input.pop("metal_weight_grams", None)
 
     # ---- ENSURE MINIMUM REQUIRED FIELDS ----
-    cs = user_input["center_stone"]
+    cs = user_input.get("center_stone", {})
+    center_carat = float(cs.get("carat") or 0.0)
+    has_center_stone = center_carat > 0
+    side_stones = user_input.get("side_stones", [])
+    has_valid_side_stones = any(
+        int(stone.get("quantity") or 0) > 0 and float(stone.get("total_carat_weight") or 0.0) > 0
+        for stone in side_stones
+    )
 
-    # Carat must exist
-    if not cs.get("carat"):
-        raise Exception("Carat is required to estimate price")
+    if not has_center_stone and not has_valid_side_stones:
+        raise Exception(
+            "Please provide either center stone carat or at least one valid side-stone group."
+        )
 
     # Apply defaults BEFORE calling any pricing client
-    cs["color"] = cs.get("color") or "G"
-    cs["clarity"] = cs.get("clarity") or "VS1"
-    cs["shape"] = cs.get("shape") or "Round"
-    side_stones = user_input.get("side_stones", [])
+    if has_center_stone:
+        cs["color"] = cs.get("color") or "G"
+        cs["clarity"] = cs.get("clarity") or "VS1"
+        cs["shape"] = cs.get("shape") or "Round"
     user_input["brand_policy_key"] = _normalize_brand_policy_key(user_input)
 
     # ----------------------------
     # PRICE SOURCE SWITCH
     # ----------------------------
 
-    if PRICE_SOURCE == "rapnet":
-
-        anchor_result = get_anchor_with_fallback(   
-            cs,
-            rapnet_token,
-            call_rapnet_api,
-            compute_anchor_from_rapnet
-        )
-
-    elif PRICE_SOURCE == "gemgem":
-
-        anchor_result = get_anchor_with_fallback_gemgem(
-            cs
-        )
-
+    if has_center_stone:
+        if PRICE_SOURCE == "rapnet":
+            anchor_result = get_anchor_with_fallback(
+                cs,
+                rapnet_token,
+                call_rapnet_api,
+                compute_anchor_from_rapnet
+            )
+        elif PRICE_SOURCE == "gemgem":
+            anchor_result = get_anchor_with_fallback_gemgem(cs)
+        else:
+            raise Exception(f"Invalid PRICE_SOURCE: {PRICE_SOURCE}")
     else:
-        raise Exception(f"Invalid PRICE_SOURCE: {PRICE_SOURCE}")
+        anchor_result = {
+            "anchor": {"low": 0.0, "high": 0.0},
+            "comparables": [],
+            "count": 0,
+            "used_fallback": False,
+            "effective_specs": None,
+            "confidence": {
+                "score": 1.0,
+                "label": "side_stones_only"
+            },
+            "fallback_expansion": {
+                "carat_delta": 0.0,
+                "color_expand": 0,
+                "clarity_expand": 0,
+                "lab_broadened": False
+            },
+            "insufficient_comparables": False
+        }
 
 
     # ---- HANDLE NO RESULTS ----
