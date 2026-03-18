@@ -246,13 +246,13 @@ def get_anchor_with_fallback(center_stone, rapnet_token,call_rapnet_api, compute
 
                         if anchor_data is not None:
                             diamonds = res.get("response", {}).get("body", {}).get("diamonds", [])
-                            comparable_count = len(diamonds)
+                            comparable_count = int(anchor_data.get("count") or len(diamonds))
                             anchor = anchor_data.get("anchor", anchor_data)
 
                             candidate = {
                                 "low": anchor["low"],
                                 "high": anchor["high"],
-                                "comparables": diamonds[:5],
+                                "comparables": anchor_data.get("comparables", diamonds[:5]),
                                 "count": comparable_count,
                                 "effective_specs": {
                                     "carat_min": carat_from,
@@ -342,12 +342,16 @@ def compute_anchor_from_rapnet(rapnet_response, target_stone=None, search_meta=N
     diamonds = rapnet_response["response"]["body"]["diamonds"]
 
     weighted_prices = []
+    weighted_comparables = []
     for d in diamonds:
         price = _to_float(d.get("total_sales_price"))
         if price is None:
             continue
         weight = _compute_similarity_weight(d, target_stone or {}) if target_stone else 1.0
         weighted_prices.append((price, weight))
+        d_enriched = dict(d)
+        d_enriched["similarity_weight"] = round(weight, 4)
+        weighted_comparables.append(d_enriched)
 
     if len(weighted_prices) < 1:
         return None
@@ -377,10 +381,15 @@ def compute_anchor_from_rapnet(rapnet_response, target_stone=None, search_meta=N
     thin_data_penalty = 0.0 if discount_multiplier == 1.0 else (1.0 - discount_multiplier) * 0.5
     confidence_score = max(0.05, min(1.0, avg_weight - expansion_penalty - thin_data_penalty))
 
+    weighted_comparables.sort(
+        key=lambda x: (_to_float(x.get("similarity_weight")) or 0.0),
+        reverse=True
+    )
+
     return {
         "anchor": anchor,
-        "comparables": diamonds[:5],  # store top comps
-        "count": len(diamonds),
+        "comparables": weighted_comparables[:5],  # highest-weight comps first
+        "count": len(weighted_comparables),
         "confidence": {
             "score": round(confidence_score, 2),
             "label": _confidence_label(confidence_score),

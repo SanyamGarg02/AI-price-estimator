@@ -45,8 +45,14 @@ def _extract_comparable_specs(comp):
         or comp.get("total_sales_price")
         or comp.get("price_usd")
     )
+    similarity_weight = comp.get("similarity_weight")
+    try:
+        similarity_weight = round(float(similarity_weight), 3)
+    except Exception:
+        similarity_weight = "N/A"
 
     return {
+        "Similarity Weight": similarity_weight,
         "Listing ID": listing_id if listing_id is not None else "N/A",
         "Name": name,
         "Price (USD)": price_usd if price_usd is not None else "N/A",

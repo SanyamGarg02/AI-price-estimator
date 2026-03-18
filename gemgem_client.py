@@ -247,6 +247,7 @@ def get_anchor_with_fallback_gemgem(center_stone):
 
                 if len(prices) > 0:
                     weighted_prices = []
+                    weighted_comparables = []
                     for p in products:
                         price = _to_float(
                             p.get("price", {})
@@ -264,6 +265,9 @@ def get_anchor_with_fallback_gemgem(center_stone):
                             }
                         )
                         weighted_prices.append((price, weight))
+                        p_enriched = dict(p)
+                        p_enriched["similarity_weight"] = round(weight, 4)
+                        weighted_comparables.append(p_enriched)
 
                     if not weighted_prices:
                         continue
@@ -273,6 +277,11 @@ def get_anchor_with_fallback_gemgem(center_stone):
                     p75 = _weighted_percentile_price(weighted_prices, 0.75)
                     if p25 is None or p75 is None:
                         continue
+
+                    weighted_comparables.sort(
+                        key=lambda x: _to_float(x.get("similarity_weight")) or 0.0,
+                        reverse=True
+                    )
 
                     count = len(weighted_prices)
                     discount_multiplier = 1.0
@@ -303,10 +312,10 @@ def get_anchor_with_fallback_gemgem(center_stone):
                             "color_step": color_step,
                             "clarity_step": clarity_step
                         },
-                        "count": len(prices),
+                        "count": count,
                         "used_fallback": (carat_step != 0 or color_step != 0 or clarity_step != 0),
-                        "comparables": products[:5],
-                        "insufficient_comparables": len(prices) < MIN_COMPARABLES_REQUIRED,
+                        "comparables": weighted_comparables[:5],
+                        "insufficient_comparables": count < MIN_COMPARABLES_REQUIRED,
                         "confidence": {
                             "score": round(confidence_score, 2),
                             "label": _confidence_label(confidence_score),
