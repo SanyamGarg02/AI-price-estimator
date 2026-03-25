@@ -250,12 +250,22 @@ def _render_final_result_ui(result):
 
 def get_env(key, default=None):
     # prefer OS env (local .env), else Streamlit secrets, else default
-    return os.getenv(key) or st.secrets.get(key, default)
+    env_val = os.getenv(key)
+    if env_val is not None and str(env_val).strip() != "":
+        return env_val
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
 
 
 PRICE_SOURCE = (get_env("PRICE_SOURCE", "gemgem")).lower()
 ENABLE_AI = (get_env("ENABLE_AI", "false")).lower() == "true"
 USE_RAPNET = PRICE_SOURCE == "rapnet"
+CHATBOT_ESTIMATOR_URL = get_env(
+    "CHATBOT_ESTIMATOR_URL",
+    "https://ai-price-estimator-improved-chatbot.streamlit.app/",
+)
 from pricing_ai_for_ui import run_pricing_pipeline  # your main function
 SHAPES = [
 "Round",
@@ -346,6 +356,8 @@ TOP_RESALE_BRANDS = [
 ]
 
 st.title("AI Price Estimation MVP")
+if CHATBOT_ESTIMATOR_URL:
+    st.link_button("Switch To Chatbot Estimator", CHATBOT_ESTIMATOR_URL)
 if "side_stone_count" not in st.session_state:
     st.session_state["side_stone_count"] = 0
 
