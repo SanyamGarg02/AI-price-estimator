@@ -4,6 +4,7 @@ load_dotenv()
 import json
 import os
 import re
+import difflib
 from typing import Dict, Optional, Tuple
 
 import streamlit as st
@@ -57,6 +58,45 @@ CLARITY_LOOKUP = {c.lower(): c for c in CLARITIES}
 METAL_LOOKUP = {m.lower(): m for m in METALS}
 FLUORESCENCE_LOOKUP = {f.lower(): f for f in FLUORESCENCE}
 BRAND_LOOKUP = {b.lower(): b for b in TOP_RESALE_BRANDS}
+
+CUT_ALIASES = {
+    "id": "Ideal",
+    "ideal": "Ideal",
+    "ex": "Excellent",
+    "exc": "Excellent",
+    "excellent": "Excellent",
+    "vg": "Very Good",
+    "very good": "Very Good",
+    "gd": "Good",
+    "good": "Good",
+}
+
+CLARITY_ALIASES = {
+    "fl": "FL",
+    "if": "IF",
+    "vvs1": "VVS1",
+    "vvs2": "VVS2",
+    "vs1": "VS1",
+    "vs2": "VS2",
+    "si1": "SI1",
+    "si2": "SI2",
+    "si3": "SI3",
+    "i1": "I1",
+    "i2": "I2",
+    "i3": "I3",
+}
+
+ITEM_TYPE_TOKENS = {
+    "ring": "ring",
+    "necklace": "necklace",
+    "chain": "chain",
+    "pendant": "pendant",
+    "earring": "earring",
+    "bracelet": "bracelet",
+    "bangle": "bangle",
+    "anklet": "anklet",
+    "brooch": "brooch",
+}
 
 
 def _default_profile() -> Dict:
@@ -120,6 +160,14 @@ def _canonical_jewelry_type(value: Optional[str]) -> Optional[str]:
         return "Loose Diamond"
     if any(tok in t for tok in jewelry_tokens):
         return "Diamond Jewelry"
+    # Fuzzy rescue for typos like "neckalce", "braclet", "earing".
+    words = re.findall(r"[a-z]+", t)
+    for w in words:
+        if difflib.get_close_matches(w, jewelry_tokens, n=1, cutoff=0.82):
+            return "Diamond Jewelry"
+    # Strong jewelry intent signals.
+    if any(x in t for x in ["gold", "platinum", "pt950", "gram", "grams", "g "]):
+        return "Diamond Jewelry"
     return None
 
 
@@ -130,18 +178,7 @@ def _extract_with_regex(text: str) -> Dict:
     inferred_type = _canonical_jewelry_type(t)
     if inferred_type:
         out["jewelry_type"] = inferred_type
-    item_tokens = {
-        "ring": "ring",
-        "necklace": "necklace",
-        "chain": "chain",
-        "pendant": "pendant",
-        "earring": "earring",
-        "bracelet": "bracelet",
-        "bangle": "bangle",
-        "anklet": "anklet",
-        "brooch": "brooch",
-    }
-    for token, item in item_tokens.items():
+    for token, item in ITEM_TYPE_TOKENS.items():
         if token in t:
             out["jewelry_item_type"] = item
             break
@@ -179,21 +216,10 @@ def _extract_with_regex(text: str) -> Dict:
             out["cut"] = val
             break
     if "cut" not in out:
-        cut_aliases = {
-            "id": "Ideal",
-            "ideal": "Ideal",
-            "ex": "Excellent",
-            "exc": "Excellent",
-            "excellent": "Excellent",
-            "vg": "Very Good",
-            "very good": "Very Good",
-            "gd": "Good",
-            "good": "Good",
-        }
         tokens = re.findall(r"\b[a-z]+\b", t)
         for tk in tokens:
-            if tk in cut_aliases:
-                out["cut"] = cut_aliases[tk]
+            if tk in CUT_ALIASES:
+                out["cut"] = CUT_ALIASES[tk]
                 break
 
     for key, val in FLUORESCENCE_LOOKUP.items():
@@ -356,6 +382,29 @@ def _merge_profile(profile: Dict, updates: Dict) -> Dict:
         else:
             profile[k] = v
     return profile
+
+
+def _coerce_enum(value: Optional[str], allowed: list, aliases: Optional[dict] = None) -> Optional[str]:
+    if value in (None, ""):
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    if s in allowed:
+        return s
+    s_lower = s.lower()
+    alias_map = aliases or {}
+    if s_lower in alias_map:
+        v = alias_map[s_lower]
+        return v if v in allowed else None
+    allowed_l = {a.lower(): a for a in allowed}
+    if s_lower in allowed_l:
+        return allowed_l[s_lower]
+    # fuzzy rescue for typos like "whte gold", "vvs-1", etc.
+    match = difflib.get_close_matches(s_lower, list(allowed_l.keys()), n=1, cutoff=0.84)
+    if match:
+        return allowed_l[match[0]]
+    return None
 
 
 def _llm_field_is_explicit(key: str, message: str, last_asked_key: Optional[str]) -> bool:
@@ -577,11 +626,17 @@ def _sanitize_profile(profile: Dict) -> Dict:
             if s.lower() in p["shape"].lower():
                 p["shape"] = s
                 break
-    if p.get("cut") and p["cut"] not in CUTS:
-        for c in CUTS:
-            if c.lower() in p["cut"].lower():
-                p["cut"] = c
-                break
+    if p.get("shape") and p["shape"] not in SHAPES:
+        p["shape"] = _coerce_enum(p.get("shape"), SHAPES)
+    if p.get("shape") not in SHAPES:
+        p["shape"] = None
+
+    if p.get("color"):
+        c = str(p["color"]).strip().upper().replace(" ", "")
+        p["color"] = c if c in COLORS else None
+
+    p["clarity"] = _coerce_enum(p.get("clarity"), CLARITIES, CLARITY_ALIASES)
+    p["cut"] = _coerce_enum(p.get("cut"), CUTS, CUT_ALIASES)
     if p.get("condition") and p["condition"] not in CONDITIONS:
         condition_aliases = {
             "almost new": "Like New",
@@ -590,31 +645,36 @@ def _sanitize_profile(profile: Dict) -> Dict:
             "good/minor wear": "Good",
             "needs repair": "Fair",
             "noticeable wear": "Fair",
+            "ex": "Excellent",
+            "exc": "Excellent",
         }
         alias = condition_aliases.get(str(p["condition"]).strip().lower())
         if alias:
             p["condition"] = alias
-    if p.get("condition") and p["condition"] not in CONDITIONS:
-        for c in CONDITIONS:
-            if c.lower() in p["condition"].lower():
-                p["condition"] = c
-                break
-    if p.get("condition") and p["condition"] not in CONDITIONS:
-        p["condition"] = None
+    p["condition"] = _coerce_enum(p.get("condition"), CONDITIONS, {
+        "almost new": "Like New",
+        "like-new": "Like New",
+        "minor wear": "Good",
+        "good/minor wear": "Good",
+        "needs repair": "Fair",
+        "noticeable wear": "Fair",
+        "ex": "Excellent",
+        "exc": "Excellent",
+    })
     if p.get("metal") and p["metal"] not in METALS:
-        m = p["metal"].lower()
+        m = str(p["metal"]).lower()
         for k, v in METAL_LOOKUP.items():
             if k in m:
                 p["metal"] = v
                 break
+    p["metal"] = _coerce_enum(p.get("metal"), METALS)
     if p.get("fluorescence") and p["fluorescence"] not in FLUORESCENCE:
         f = str(p["fluorescence"]).lower()
         for k, v in FLUORESCENCE_LOOKUP.items():
             if k in f:
                 p["fluorescence"] = v
                 break
-    if p.get("fluorescence") and p["fluorescence"] not in FLUORESCENCE:
-        p["fluorescence"] = None
+    p["fluorescence"] = _coerce_enum(p.get("fluorescence"), FLUORESCENCE)
     if p.get("brand_selection"):
         b = str(p["brand_selection"]).strip().lower()
         if b in ("yes", "y", "true", "1", "branded"):
@@ -645,7 +705,57 @@ def _sanitize_profile(profile: Dict) -> Dict:
             p["brand_proof"] = "No"
         else:
             p["brand_proof"] = None
+
+    # Purity normalization.
+    p["purity"] = _coerce_enum(p.get("purity"), PURITY, {
+        "950pt": "PT950",
+        "pt 950": "PT950",
+        "pt-950": "PT950",
+        "pt": "PT950",
+    })
+
+    # Numeric guards.
+    try:
+        if p.get("carat") is not None:
+            p["carat"] = float(p["carat"])
+            if p["carat"] <= 0:
+                p["carat"] = None
+    except Exception:
+        p["carat"] = None
+    try:
+        if p.get("metal_weight_grams") is not None:
+            p["metal_weight_grams"] = float(p["metal_weight_grams"])
+            if p["metal_weight_grams"] <= 0:
+                p["metal_weight_grams"] = None
+    except Exception:
+        p["metal_weight_grams"] = None
+    try:
+        if p.get("side_stone_quantity") is not None:
+            p["side_stone_quantity"] = int(p["side_stone_quantity"])
+            if p["side_stone_quantity"] <= 0:
+                p["side_stone_quantity"] = None
+    except Exception:
+        p["side_stone_quantity"] = None
+    try:
+        if p.get("side_stone_total_carat_weight") is not None:
+            p["side_stone_total_carat_weight"] = float(p["side_stone_total_carat_weight"])
+            if p["side_stone_total_carat_weight"] <= 0:
+                p["side_stone_total_carat_weight"] = None
+    except Exception:
+        p["side_stone_total_carat_weight"] = None
+
     return p
+
+
+def _friendly_error_message(err_text: str) -> str:
+    t = (err_text or "").lower()
+    if "rapnet" in t or "token" in t or "401" in t or "403" in t:
+        return "I couldn’t fetch live market data right now. Please check token/access and try again."
+    if "index" in t or "not in list" in t or "keyerror" in t or "valueerror" in t:
+        return "I understood most details, but one field format wasn’t recognized. Please rephrase once and I’ll continue."
+    if "timeout" in t or "connection" in t:
+        return "The pricing service timed out. Please retry in a moment."
+    return "I couldn’t complete this estimate right now. Please try once more with the same details."
 
 
 def _build_user_input(profile: Dict) -> Dict:
@@ -692,6 +802,36 @@ def _build_user_input(profile: Dict) -> Dict:
         "brand": profile.get("brand"),
         "brand_proof": profile.get("brand_proof") or "No",
     }
+
+
+def _prepare_safe_user_input(profile: Dict) -> Dict:
+    # Work on sanitized profile clone.
+    p = _sanitize_profile(dict(profile))
+    if p.get("jewelry_type") == "Diamond Jewelry":
+        if not p.get("metal"):
+            p["metal"] = "White Gold"
+        if not p.get("purity"):
+            p["purity"] = "14K"
+        if not p.get("metal_weight_grams"):
+            p["metal_weight_grams"] = _default_metal_weight(p.get("jewelry_item_type"))
+        if not p.get("brand_selection"):
+            p["brand_selection"] = "Other / Unknown"
+        if p.get("brand_proof") not in ("Yes", "No"):
+            p["brand_proof"] = "No"
+    if not p.get("condition"):
+        p["condition"] = "Excellent"
+    if not p.get("shape"):
+        p["shape"] = "Round"
+    if not p.get("cut"):
+        p["cut"] = "Excellent"
+    if not p.get("color"):
+        p["color"] = "G"
+    if not p.get("clarity"):
+        p["clarity"] = "VS1"
+    if not p.get("fluorescence"):
+        p["fluorescence"] = "None"
+
+    return _build_user_input(p)
 
 
 def _friendly_bot_price_response(result: Dict, assumptions: Optional[list] = None) -> str:
@@ -869,12 +1009,12 @@ with left:
             )
             st.rerun()
 
-        user_input = _build_user_input(profile)
+        user_input = _prepare_safe_user_input(profile)
         ai_layer = "Enabled" if ENABLE_AI else "Disabled"
         try:
             result = run_pricing_pipeline(user_input, rapnet_token, ai_layer)
         except Exception as exc:
-            result = {"error": str(exc)}
+            result = {"error": _friendly_error_message(str(exc))}
 
         st.session_state["last_result"] = result
         st.session_state["chat_messages"].append(
