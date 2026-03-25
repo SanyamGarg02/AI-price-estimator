@@ -13,13 +13,23 @@ from pricing_ai_for_ui import run_pricing_pipeline
 
 
 def get_env(key, default=None):
-    return os.getenv(key) or st.secrets.get(key, default)
+    env_val = os.getenv(key)
+    if env_val is not None and str(env_val).strip() != "":
+        return env_val
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
 
 
 PRICE_SOURCE = (get_env("PRICE_SOURCE", "gemgem")).lower()
 USE_RAPNET = PRICE_SOURCE == "rapnet"
 ENABLE_AI = (get_env("ENABLE_AI", "false")).lower() == "true"
 OPENAI_API_KEY = get_env("OPENAI_API_KEY")
+FORM_ESTIMATOR_URL = get_env(
+    "FORM_ESTIMATOR_URL",
+    "https://ai-price-estimator-improved.streamlit.app/",
+)
 
 SHAPES = [
     "Round", "Pear", "Oval", "Marquise", "Heart", "Radiant", "Princess",
@@ -758,6 +768,72 @@ def _friendly_error_message(err_text: str) -> str:
     return "I couldn’t complete this estimate right now. Please try once more with the same details."
 
 
+def _nested_get(data, path, default=None):
+    cur = data
+    for key in path:
+        if isinstance(cur, dict) and key in cur:
+            cur = cur[key]
+        else:
+            return default
+    return cur
+
+
+def _build_product_url(comp: Dict) -> str:
+    direct_url = comp.get("url") or comp.get("product_url")
+    if direct_url:
+        return str(direct_url)
+    slug = comp.get("slug")
+    if slug:
+        slug = str(slug).strip().lstrip("/")
+        if slug.startswith("http://") or slug.startswith("https://"):
+            return slug
+        return f"https://www.gemgem.com/product/{slug}"
+    return "N/A"
+
+
+def _extract_comparable_specs(comp: Dict) -> Dict:
+    listing_id = (
+        comp.get("listing_id")
+        or comp.get("id")
+        or _nested_get(comp, ["diamond_id"])
+        or _nested_get(comp, ["stock_num"])
+    )
+    name = (
+        comp.get("name")
+        or _nested_get(comp, ["title"])
+        or _nested_get(comp, ["description"])
+        or "N/A"
+    )
+    price_usd = (
+        _nested_get(comp, ["price", "USD", "price"])
+        or comp.get("total_sales_price")
+        or comp.get("price_usd")
+        or "N/A"
+    )
+    return {
+        "Listing ID": listing_id if listing_id is not None else "N/A",
+        "Name": name,
+        "Price (USD)": price_usd,
+        "Product URL": _build_product_url(comp),
+    }
+
+
+def _display_comparables_chatbot(result: Dict):
+    comparables = result.get("comparables") or []
+    count = int(result.get("comparable_count") or len(comparables) or 0)
+    with st.expander(f"Comparable Diamonds Used ({count})", expanded=False):
+        if not comparables:
+            st.write("No comparable references available.")
+            return
+        rows = [_extract_comparable_specs(c) for c in comparables]
+        st.dataframe(
+            rows,
+            hide_index=True,
+            use_container_width=True,
+            column_config={"Product URL": st.column_config.LinkColumn("Product URL")},
+        )
+
+
 def _build_user_input(profile: Dict) -> Dict:
     side_stones = []
     if (
@@ -899,6 +975,8 @@ def _render_profile_snapshot(profile: Dict):
 st.set_page_config(page_title="Jewelry Pricing Chatbot MVP", page_icon="💬", layout="wide")
 st.title("Jewelry Pricing Chatbot MVP")
 st.caption("Conversational estimator powered by your existing pricing engine.")
+if FORM_ESTIMATOR_URL:
+    st.link_button("Switch To Form Estimator", FORM_ESTIMATOR_URL)
 
 if "chat_messages" not in st.session_state:
     _reset_chat()
@@ -1034,4 +1112,8 @@ with right:
             c1, c2 = st.columns(2)
             c1.metric("Low", f"${fp.get('low', 0):,.2f}")
             c2.metric("High", f"${fp.get('high', 0):,.2f}")
+            # Show comparables in chatbot output, especially useful for loose-diamond flow.
+            prof = st.session_state.get("profile", {})
+            if prof.get("jewelry_type") == "Loose Diamond":
+                _display_comparables_chatbot(res)
             st.caption("Tip: you can edit details in chat and I’ll re-price instantly.")
