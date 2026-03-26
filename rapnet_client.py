@@ -14,13 +14,13 @@ MIN_RESULTS_TO_KEEP_GIA_ONLY = 5
 LABS_PRIMARY = ["GIA"]
 LABS_FALLBACK = ["GIA", "IGI", "AGS", "EGL", "HRD"]
 THIN_DATA_DISCOUNT_BY_COUNT = {
-    1: 0.55,
-    2: 0.62,
-    3: 0.70,
-    4: 0.78,
-    5: 0.85,
-    6: 0.92,
-    7: 0.92
+    1: 0.78,
+    2: 0.84,
+    3: 0.89,
+    4: 0.93,
+    5: 0.96,
+    6: 0.98,
+    7: 0.98
 }
 THIN_DATA_NO_DISCOUNT_MIN_COUNT = 8
 RAPNET_CACHE_TTL_SECONDS = 60 * 60
@@ -72,6 +72,18 @@ def _extract_diamond_carat(d):
     )
 
 
+def _compute_carat_penalty(target_carat, comp_carat):
+    """
+    Use a softer non-linear penalty for near-size comps and cap the maximum
+    influence so a single larger/smaller comp does not dominate the anchor.
+    """
+    if target_carat is None or comp_carat is None:
+        return 0.0
+    relative_delta = abs(comp_carat - target_carat) / max(target_carat, 0.01)
+    softened_penalty = (relative_delta ** 0.8) * 0.45
+    return min(0.35, softened_penalty)
+
+
 def _compute_similarity_weight(diamond, target):
     """
     Similarity weighting so relaxed comps influence anchor less.
@@ -85,9 +97,7 @@ def _compute_similarity_weight(diamond, target):
     comp_color_idx = _get_color_index(_extract_diamond_color(diamond))
     comp_clarity_idx = _get_clarity_index(_extract_diamond_clarity(diamond))
 
-    carat_penalty = 0.0
-    if target_carat is not None and comp_carat is not None:
-        carat_penalty = abs(comp_carat - target_carat) / max(target_carat, 0.01)
+    carat_penalty = _compute_carat_penalty(target_carat, comp_carat)
 
     color_penalty = 0.0
     if target_color_idx is not None and comp_color_idx is not None:
