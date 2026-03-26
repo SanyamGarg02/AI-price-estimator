@@ -8,13 +8,13 @@ COLOR_ORDER = ["d","e","f","g","h","i","j","k","l","m"]
 CLARITY_ORDER = ["if","vvs1","vvs2","vs1","vs2","si1","si2","si3","i1","i2","i3"]
 MIN_COMPARABLES_REQUIRED = 3
 THIN_DATA_DISCOUNT_BY_COUNT = {
-    1: 0.55,
-    2: 0.62,
-    3: 0.70,
-    4: 0.78,
-    5: 0.85,
-    6: 0.92,
-    7: 0.92
+    1: 0.78,
+    2: 0.84,
+    3: 0.89,
+    4: 0.93,
+    5: 0.96,
+    6: 0.98,
+    7: 0.98
 }
 THIN_DATA_NO_DISCOUNT_MIN_COUNT = 8
 GEMGEM_CACHE_TTL_SECONDS = 60 * 60
@@ -84,6 +84,18 @@ def _extract_carat_from_product(product):
     return None
 
 
+def _compute_carat_penalty(target_carat, comp_carat):
+    """
+    Use a softer non-linear penalty for near-size comps and cap the maximum
+    influence so a single larger/smaller comp does not dominate the anchor.
+    """
+    if target_carat is None or comp_carat is None:
+        return 0.0
+    relative_delta = abs(comp_carat - target_carat) / max(target_carat, 0.01)
+    softened_penalty = (relative_delta ** 0.8) * 0.45
+    return min(0.35, softened_penalty)
+
+
 def _compute_similarity_weight(product, target):
     target_carat = _to_float(target.get("carat"))
     target_color = str(target.get("color") or "").lower() or None
@@ -93,9 +105,7 @@ def _compute_similarity_weight(product, target):
     comp_color = _extract_color_from_product(product)
     comp_clarity = _extract_clarity_from_product(product)
 
-    carat_penalty = 0.0
-    if target_carat is not None and comp_carat is not None:
-        carat_penalty = abs(comp_carat - target_carat) / max(target_carat, 0.01)
+    carat_penalty = _compute_carat_penalty(target_carat, comp_carat)
 
     color_penalty = 0.0
     if target_color in COLOR_ORDER and comp_color in COLOR_ORDER:
