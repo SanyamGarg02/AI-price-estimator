@@ -291,13 +291,13 @@ def _extract_with_regex(text: str) -> Dict:
 
 def _extract_with_llm(
     message: str, existing: Dict, last_asked_key: Optional[str] = None
-) -> Tuple[Dict, bool]:
+) -> Tuple[Dict, bool, Dict]:
     if not OPENAI_API_KEY:
-        return {}, False
+        return {}, False, {"no_side_stones_intent": False, "answer_confidence": 0.0}
     try:
         from openai import OpenAI
     except Exception:
-        return {}, False
+        return {}, False, {"no_side_stones_intent": False, "answer_confidence": 0.0}
 
     client = OpenAI(api_key=OPENAI_API_KEY)
     prompt = (
@@ -320,9 +320,13 @@ def _extract_with_llm(
         '    "side_stone_quantity": null|number,\n'
         '    "side_stone_total_carat_weight": null|number\n'
         "  },\n"
-        '  "unknown_intent_for_last_asked_key": boolean\n'
+        '  "unknown_intent_for_last_asked_key": boolean,\n'
+        '  "no_side_stones_intent": boolean,\n'
+        '  "answer_confidence": number\n'
         "}\n"
         "Do not infer unspecified fields. If user did not explicitly provide a value, return null for that field.\n"
+        "Set no_side_stones_intent=true when user says there are no side stones, even indirectly.\n"
+        "Set answer_confidence between 0 and 1 for how confidently this message answered the asked field.\n"
         "Set unknown_intent_for_last_asked_key=true when user indicates uncertainty "
         "(e.g., not sure, no clue, idk, unknown, cannot say), specifically for the asked field.\n"
         f"Current known values: {json.dumps(existing)}\n"
@@ -334,20 +338,28 @@ def _extract_with_llm(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
-            max_tokens=180,
+            max_tokens=260,
             response_format={"type": "json_object"},
         )
         data = json.loads(resp.choices[0].message.content or "{}")
         if isinstance(data, dict):
             # backward-compat: if model returns flat dict, treat as fields
             if "fields" not in data:
-                return data, bool(data.get("unknown_intent_for_last_asked_key", False))
+                meta = {
+                    "no_side_stones_intent": bool(data.get("no_side_stones_intent", False)),
+                    "answer_confidence": float(data.get("answer_confidence") or 0.0),
+                }
+                return data, bool(data.get("unknown_intent_for_last_asked_key", False)), meta
             fields = data.get("fields") or {}
             unknown_intent = bool(data.get("unknown_intent_for_last_asked_key", False))
-            return fields if isinstance(fields, dict) else {}, unknown_intent
+            meta = {
+                "no_side_stones_intent": bool(data.get("no_side_stones_intent", False)),
+                "answer_confidence": float(data.get("answer_confidence") or 0.0),
+            }
+            return fields if isinstance(fields, dict) else {}, unknown_intent, meta
     except Exception:
-        return {}, False
-    return {}, False
+        return {}, False, {"no_side_stones_intent": False, "answer_confidence": 0.0}
+    return {}, False, {"no_side_stones_intent": False, "answer_confidence": 0.0}
 
 
 def _merge_profile(profile: Dict, updates: Dict) -> Dict:
@@ -527,6 +539,71 @@ def _question_for(key: str, turn_seed: int) -> str:
     return variants[idx]
 
 
+FUN_ACK_TEMPLATES = [
+    "Love it.",
+    "Perfect.",
+    "Great, thanks.",
+    "Nice one.",
+    "Awesome.",
+]
+
+FUN_LOW_CONF_TEMPLATES = [
+    "Quick check: I might have missed that detail in your last message.",
+    "Tiny clarification so I can be more accurate.",
+    "Let’s lock one detail to keep your estimate sharp.",
+    "I want to avoid guessing here, one quick confirmation.",
+]
+
+FUN_ASSUMPTION_TEMPLATES = [
+    "No stress, I’ll use a standard assumption for `{field}` and keep moving.",
+    "All good, I’ll use a common default for `{field}` for now.",
+    "Got you. I’ll apply a practical default for `{field}` and continue.",
+]
+
+FUN_PRICE_TEMPLATES = [
+    "Great signal so far. A strong listing range is **${low:,.0f} - ${high:,.0f}**.",
+    "You’re in a healthy market zone. I’d list around **${low:,.0f} - ${high:,.0f}**.",
+    "Nice setup. A competitive resale window is **${low:,.0f} - ${high:,.0f}**.",
+]
+
+
+def _pick_template(templates: list, seed: int) -> str:
+    if not templates:
+        return ""
+    return templates[seed % len(templates)]
+
+
+def _extraction_confidence(
+    user_msg: str,
+    regex_updates: Dict,
+    llm_updates: Dict,
+    last_asked_key: Optional[str],
+    llm_unknown_intent: bool,
+) -> float:
+    merged = dict(regex_updates)
+    merged.update({k: v for k, v in llm_updates.items() if v not in (None, "")})
+    merged_count = len(merged)
+    token_count = len(re.findall(r"[a-zA-Z0-9]+", user_msg or ""))
+
+    score = 0.0
+    if merged_count == 0:
+        score = 0.15
+    elif merged_count == 1:
+        score = 0.45
+    elif merged_count == 2:
+        score = 0.62
+    else:
+        score = 0.78
+
+    if last_asked_key and merged.get(last_asked_key) not in (None, ""):
+        score += 0.15
+    if llm_unknown_intent and last_asked_key:
+        score += 0.1
+    if token_count <= 2 and merged_count == 0:
+        score -= 0.1
+    return max(0.0, min(1.0, score))
+
+
 def _next_question(profile: Dict, turn_seed: int) -> Tuple[Optional[str], Optional[str]]:
     required = [
         "jewelry_type",
@@ -616,12 +693,45 @@ def _default_for_missing_key(key: str, profile: Optional[Dict] = None):
 def _parse_yes_no(text: str):
     t = _normalize_text(text).lower()
     yes_tokens = ["yes", "yep", "yeah", "y", "has", "with side", "includes"]
-    no_tokens = ["no", "nope", "n", "without", "just center", "only center"]
+    no_tokens = [
+        "no",
+        "nope",
+        "n",
+        "without",
+        "just center",
+        "only center",
+        "does not have",
+        "doesn't have",
+        "dont have",
+        "don't have",
+        "no side stone",
+        "no side stones",
+        "without side stone",
+        "without side stones",
+    ]
     if any(tok in t for tok in yes_tokens):
         return True
     if any(tok in t for tok in no_tokens):
         return False
     return None
+
+
+def _no_side_stone_intent_rule(text: str) -> bool:
+    t = _normalize_text(text).lower()
+    patterns = [
+        "no side stone",
+        "no side stones",
+        "without side stone",
+        "without side stones",
+        "does not have side stone",
+        "doesn't have side stone",
+        "no side diamonds",
+        "without side diamonds",
+        "only center stone",
+        "single center stone",
+        "center stone only",
+    ]
+    return any(p in t for p in patterns)
 
 
 def _sanitize_profile(profile: Dict) -> Dict:
@@ -910,7 +1020,7 @@ def _prepare_safe_user_input(profile: Dict) -> Dict:
     return _build_user_input(p)
 
 
-def _friendly_bot_price_response(result: Dict, assumptions: Optional[list] = None) -> str:
+def _friendly_bot_price_response(result: Dict, assumptions: Optional[list] = None, turn_seed: int = 0) -> str:
     if result.get("error"):
         return (
             "I couldn’t confidently price that yet. "
@@ -921,11 +1031,9 @@ def _friendly_bot_price_response(result: Dict, assumptions: Optional[list] = Non
     high = fp.get("high")
     if low is None or high is None:
         return "I found the specs, but couldn't build a final range. Please try again."
-    msg = (
-        f"Great news! Based on your specs and current market signals, a strong listing range is "
-        f"**${low:,.0f} - ${high:,.0f}**. "
-        "This is a competitive zone to attract buyers while protecting your value."
-    )
+    base = _pick_template(FUN_PRICE_TEMPLATES, turn_seed)
+    msg = base.format(low=low, high=high)
+    msg += " It’s a solid balance between buyer appeal and seller value."
     if assumptions:
         msg += "\n\nAssumptions used for this estimate: " + ", ".join(sorted(set(assumptions))) + "."
     return msg
@@ -1015,6 +1123,12 @@ with left:
             yn = _parse_yes_no(user_msg)
             if yn is not None:
                 profile["side_stone_present"] = yn
+        if last_asked_key in ("side_stone_quantity", "side_stone_total_carat_weight"):
+            yn = _parse_yes_no(user_msg)
+            if yn is False or _no_side_stone_intent_rule(user_msg):
+                profile["side_stone_present"] = False
+                profile["side_stone_quantity"] = None
+                profile["side_stone_total_carat_weight"] = None
         if last_asked_key == "brand_proof":
             yn = _parse_yes_no(user_msg)
             if yn is not None:
@@ -1033,16 +1147,31 @@ with left:
                 assumptions_used.append(f"{last_asked_key}={fallback}")
 
         regex_updates = _extract_with_regex(user_msg)
-        llm_updates, llm_unknown_intent = _extract_with_llm(user_msg, profile, last_asked_key)
+        llm_updates, llm_unknown_intent, llm_meta = _extract_with_llm(user_msg, profile, last_asked_key)
         llm_updates = {
             k: v
             for k, v in llm_updates.items()
             if _llm_field_is_explicit(k, user_msg, last_asked_key)
         }
+        extraction_conf = _extraction_confidence(
+            user_msg=user_msg,
+            regex_updates=regex_updates,
+            llm_updates=llm_updates,
+            last_asked_key=last_asked_key,
+            llm_unknown_intent=llm_unknown_intent,
+        )
+        llm_answer_conf = float((llm_meta or {}).get("answer_confidence") or 0.0)
+        effective_conf = max(extraction_conf, llm_answer_conf)
         merged_updates = dict(regex_updates)
         merged_updates.update({k: v for k, v in llm_updates.items() if v not in (None, "")})
         profile = _merge_profile(profile, merged_updates)
         profile = _sanitize_profile(profile)
+
+        # AI intent override: user indicates no side stones.
+        if (llm_meta or {}).get("no_side_stones_intent"):
+            profile["side_stone_present"] = False
+            profile["side_stone_quantity"] = None
+            profile["side_stone_total_carat_weight"] = None
 
         # Generic AI intent handling: if user intent is "unknown" for asked field, auto-default and continue.
         if last_asked_key and llm_unknown_intent and profile.get(last_asked_key) in (None, ""):
@@ -1068,16 +1197,33 @@ with left:
                     st.session_state["chat_messages"].append(
                         {
                             "role": "assistant",
-                            "content": (
-                                f"No worries, I’ll use a standard estimate for `{asked_key}` "
-                                "and continue."
-                            ),
+                            "content": _pick_template(
+                                FUN_ASSUMPTION_TEMPLATES,
+                                len(st.session_state["chat_messages"]),
+                            ).format(field=asked_key),
                         }
                     )
+        # If user explicitly denied side-stones while being asked side-stone details, acknowledge it.
+        if last_asked_key in ("side_stone_quantity", "side_stone_total_carat_weight") and profile.get("side_stone_present") is False:
+            st.session_state["chat_messages"].append(
+                {
+                    "role": "assistant",
+                    "content": "Got it, no side stones. I’ll continue with center-stone pricing only.",
+                }
+            )
         st.session_state["assumptions_used"] = assumptions_used
         st.session_state["last_asked_key"] = asked_key
         if q:
-            bot_msg = f"Nice, got it. {q}"
+            ack = _pick_template(FUN_ACK_TEMPLATES, len(st.session_state["chat_messages"]))
+            # If extraction confidence is low, add a light fallback lead-in.
+            if effective_conf < 0.45:
+                preface = _pick_template(
+                    FUN_LOW_CONF_TEMPLATES,
+                    len(st.session_state["chat_messages"]),
+                )
+                bot_msg = f"{preface} {q}"
+            else:
+                bot_msg = f"{ack} {q}"
             st.session_state["chat_messages"].append({"role": "assistant", "content": bot_msg})
             st.rerun()
 
@@ -1096,7 +1242,14 @@ with left:
 
         st.session_state["last_result"] = result
         st.session_state["chat_messages"].append(
-            {"role": "assistant", "content": _friendly_bot_price_response(result, assumptions_used)}
+            {
+                "role": "assistant",
+                "content": _friendly_bot_price_response(
+                    result,
+                    assumptions_used,
+                    turn_seed=len(st.session_state["chat_messages"]),
+                ),
+            }
         )
         st.rerun()
 
