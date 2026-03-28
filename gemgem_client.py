@@ -1,6 +1,7 @@
 import requests
 import json
 import time
+import re
 
 GEMGEM_URL = "https://admin-li4d5lkr.gemgem.com/api/v1/c2c/shop"
 
@@ -41,6 +42,14 @@ def _extract_color_from_product(product):
         sval = str(val).lower()
         if sval in COLOR_ORDER:
             return sval
+    # Fallback: parse from listing name, e.g. "... 1.2ct F VS2 ..."
+    name = str(product.get("name") or "").lower()
+    m = re.search(r"\b([d-m])\s+(?:fl|if|vvs1|vvs2|vs1|vs2|si1|si2|si3|i1|i2|i3)\b", name)
+    if m:
+        return m.group(1)
+    m2 = re.search(r"\bcolor\s*([d-m])\b", name)
+    if m2:
+        return m2.group(1)
     return None
 
 
@@ -57,6 +66,14 @@ def _extract_clarity_from_product(product):
         sval = str(val).lower()
         if sval in CLARITY_ORDER:
             return sval
+    # Fallback: parse from listing name, e.g. "... F VS2 ..."
+    name = str(product.get("name") or "").lower()
+    m = re.search(r"\b(?:[d-m])\s+(fl|if|vvs1|vvs2|vs1|vs2|si1|si2|si3|i1|i2|i3)\b", name)
+    if m:
+        return m.group(1)
+    for c in CLARITY_ORDER:
+        if re.search(rf"\b{re.escape(c)}\b", name):
+            return c
     return None
 
 
