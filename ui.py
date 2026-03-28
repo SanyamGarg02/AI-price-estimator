@@ -289,7 +289,7 @@ ENABLE_AI = (get_env("ENABLE_AI", "false")).lower() == "true"
 USE_RAPNET = PRICE_SOURCE == "rapnet"
 CHATBOT_ESTIMATOR_URL = get_env(
     "CHATBOT_ESTIMATOR_URL",
-    "https://ai-price-estimator-improved-chatbot.streamlit.app/",
+    "https://ai-price-estimator-ai-chatbot.streamlit.app/",
 )
 from pricing_ai_for_ui import run_pricing_pipeline  # your main function
 SHAPES = [
