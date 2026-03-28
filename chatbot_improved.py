@@ -115,8 +115,12 @@ def _canonical_condition(value: Optional[str]) -> Optional[str]:
         "exc": "Excellent",
         "ex": "Excellent",
         "like new": "Like New",
+        "likenew": "Like New",
         "almost new": "Like New",
         "nearly new": "Like New",
+        "new": "Like New",
+        "ne": "Like New",
+        "ln": "Like New",
         "good": "Good",
         "fair": "Fair",
     }
@@ -176,6 +180,8 @@ def _sanitize_profile(p: Dict) -> Dict:
     profile["side_stones"] = cleaned
     if cleaned:
         profile["side_stone_present"] = True
+    elif profile.get("side_stone_present") not in (True, False):
+        profile["side_stone_present"] = None
 
     if profile.get("jewelry_type") == "Loose Diamond":
         profile["jewelry_item_type"] = None
@@ -203,6 +209,9 @@ def _required_fields(profile: Dict) -> List[str]:
 
     if profile.get("jewelry_type") == "Diamond Jewelry":
         req += ["jewelry_item_type", "metal", "purity", "metal_weight_grams", "brand_selection"]
+        req += ["side_stone_present"]
+        if profile.get("side_stone_present") is True and not profile.get("side_stones"):
+            req += ["side_stones"]
 
     return [k for k in req if profile.get(k) in (None, "")]
 
@@ -245,9 +254,18 @@ def _regex_fallback(user_msg: str, last_asked: Optional[str]) -> Dict:
             out["jewelry_item_type"] = item
             break
 
-    carat = re.search(r"(\d+(?:\.\d+)?)\s*(?:ct|carat)", tl)
-    if carat and "tcw" not in tl:
-        out["carat"] = float(carat.group(1))
+    # Center carat should still be captured even when tcw also exists in the same sentence.
+    center_carat = (
+        re.search(r"(?:center|centre|main)\s*stone[^\d]{0,16}(\d+(?:\.\d+)?)\s*(?:ct|carat)", tl)
+        or re.search(r"(\d+(?:\.\d+)?)\s*(?:ct|carat)[^\n]{0,24}(?:center|centre|main)\s*stone", tl)
+    )
+    if center_carat:
+        out["carat"] = float(center_carat.group(1))
+    else:
+        # If tcw is mentioned and no explicit center cue, treat carat mentions as side-stone context.
+        carat = re.search(r"(\d+(?:\.\d+)?)\s*(?:ct|carat)", tl)
+        if carat and "tcw" not in tl:
+            out["carat"] = float(carat.group(1))
 
     if last_asked == "color":
         one = re.match(r"^\s*([d-z])\s*$", tl)
@@ -266,16 +284,29 @@ def _regex_fallback(user_msg: str, last_asked: Optional[str]) -> Dict:
             break
 
     if re.search(r"\b(ex|exc|excellent)\b", tl):
-        out["cut"] = "Excellent"
-        if "condition" not in tl:
+        if last_asked == "condition":
             out["condition"] = "Excellent"
+        elif last_asked == "cut":
+            out["cut"] = "Excellent"
+        else:
+            out["cut"] = "Excellent"
+            if "condition" not in tl:
+                out["condition"] = "Excellent"
     if re.search(r"\b(vg|very good)\b", tl):
-        out["cut"] = "Very Good"
+        if last_asked == "condition":
+            out["condition"] = "Good"
+        else:
+            out["cut"] = "Very Good"
     if re.search(r"\bideal\b", tl):
-        out["cut"] = "Ideal"
+        if last_asked == "condition":
+            out["condition"] = "Excellent"
+        else:
+            out["cut"] = "Ideal"
     if re.search(r"\bgood\b", tl):
         out["condition"] = "Good"
-    if "like new" in tl or "almost new" in tl:
+    if "like new" in tl or "likenew" in tl or "almost new" in tl or "nearly new" in tl:
+        out["condition"] = "Like New"
+    if last_asked == "condition" and re.match(r"^\s*(ne|new|ln)\s*$", tl):
         out["condition"] = "Like New"
     if "fair" in tl:
         out["condition"] = "Fair"
@@ -302,6 +333,24 @@ def _regex_fallback(user_msg: str, last_asked: Optional[str]) -> Dict:
     if grams:
         out["metal_weight_grams"] = float(grams.group(1))
 
+    # Brand intent handling
+    if any(x in tl for x in [
+        "no brand", "not branded", "unbranded", "without brand", "other brand", "unknown brand"
+    ]):
+        out["brand_selection"] = "Other / Unknown"
+        out["brand"] = None
+        out["brand_proof"] = "No"
+    elif last_asked == "brand_selection" and re.search(r"\b(no|none|nah|n)\b", tl):
+        out["brand_selection"] = "Other / Unknown"
+        out["brand"] = None
+        out["brand_proof"] = "No"
+
+    if "brand proof" in tl:
+        if re.search(r"\b(yes|have|available)\b", tl):
+            out["brand_proof"] = "Yes"
+        if re.search(r"\b(no|none|not)\b", tl):
+            out["brand_proof"] = "No"
+
     side_groups = []
     pattern = re.compile(
         r"(\d+)\s*(?:side\s*stones?|stones)\b[^\d]{0,24}(?:tcw|total\s*carat(?:\s*weight)?|carat(?:\s*weight)?)\s*(?:is\s*)?(\d+(?:\.\d+)?)\s*(?:ct|carat)?"
@@ -314,8 +363,18 @@ def _regex_fallback(user_msg: str, last_asked: Optional[str]) -> Dict:
     if side_groups:
         out["side_stones"] = side_groups
         out["side_stone_present"] = True
+    if any(x in tl for x in [
+        "side stone", "side stones", "tcw", "melee", "pave", "pavé"
+    ]):
+        if out.get("side_stone_present") is None:
+            out["side_stone_present"] = True
+    if any(x in tl for x in [
+        "no side stone", "no side stones", "without side stone", "without side stones"
+    ]):
+        out["side_stone_present"] = False
     if any(x in tl for x in ["no center stone", "only side stones", "side stones only"]):
         out["carat"] = None
+        out["side_stone_present"] = True
 
     return out
 
@@ -348,6 +407,8 @@ def _ai_turn(user_msg: str, profile: Dict, missing: List[str], last_asked: Optio
         "\"brand_selection\":string|null,"
         "\"brand\":string|null,"
         "\"brand_proof\":string|null,"
+        "\"side_stone_present\":boolean|null,"
+        "\"center_stone_present\":boolean|null,"
         "\"side_stones\":[{\"quantity\":number,\"total_carat_weight\":number,\"shape\":string|null,\"color\":string|null,\"clarity\":string|null,\"cut\":string|null}]"
         "},"
         "\"unknown_fields\":[string],"
@@ -358,6 +419,11 @@ def _ai_turn(user_msg: str, profile: Dict, missing: List[str], last_asked: Optio
         f"Currently missing: {missing}\n"
         f"Last asked: {last_asked}\n"
         f"User message: {user_msg}\n"
+        "Important intent rules:\n"
+        "- quantity + tcw usually means side stones.\n"
+        "- single carat mention without quantity/tcw usually means center stone.\n"
+        "- multiple quantity/tcw groups means side-stones-only unless center stone is explicitly mentioned.\n"
+        "- If unsure, prefer side-stone interpretation when qty/tcw exists.\n"
     )
     try:
         client = OpenAI(api_key=OPENAI_API_KEY)
@@ -396,6 +462,37 @@ def _merge_profile(profile: Dict, updates: Dict) -> Dict:
         if cleaned.get(k) in (None, "") and prev.get(k) not in (None, ""):
             cleaned[k] = prev[k]
     return cleaned
+
+
+def _infer_stone_structure(profile: Dict, user_msg: str, last_asked: Optional[str]) -> Dict:
+    p = dict(profile)
+    t = _norm(user_msg).lower()
+    has_side_groups = bool(p.get("side_stones"))
+    has_center = float(p.get("carat") or 0) > 0
+
+    mentions_center = bool(re.search(r"\b(center|centre|main|solitaire)\s*stone\b", t))
+    qty_tcw_pairs = len(re.findall(
+        r"(\d+)\s*(?:side\s*stones?|stones)\b[^\d]{0,24}(?:tcw|total\s*carat(?:\s*weight)?|carat(?:\s*weight)?)\s*(?:is\s*)?(\d+(?:\.\d+)?)",
+        t
+    ))
+    has_qty_tcw = qty_tcw_pairs > 0
+
+    # If message strongly indicates side-only structure, clear center for this structure.
+    if has_qty_tcw and not mentions_center and not has_center:
+        p["side_stone_present"] = True
+        p["carat"] = None
+
+    # Multiple qty/tcw groups almost always indicate side-stone groups, not a center.
+    if qty_tcw_pairs >= 2 and not mentions_center:
+        p["side_stone_present"] = True
+        if last_asked in ("side_stones", "side_stone_present", "carat"):
+            p["carat"] = None
+
+    # If center is explicit, keep center + side combination.
+    if mentions_center and has_side_groups:
+        p["side_stone_present"] = True
+
+    return _sanitize_profile(p)
 
 
 def _build_user_input(profile: Dict) -> Dict:
@@ -475,8 +572,15 @@ def _price_story(result: Dict) -> Dict:
     }
 
 
-def _what_if(low: float, high: float, mode: str) -> Tuple[float, float]:
-    bump = {"brand": 0.06, "condition": 0.04, "timing": 0.03}.get(mode, 0.0)
+def _what_if(low: float, high: float, mode: str, profile: Dict) -> Tuple[float, float]:
+    bump = {"brand": 0.06, "timing": 0.03}.get(mode, 0.0)
+    if mode == "condition":
+        # Scenario means "what if condition were Like New".
+        # If current is Excellent, this should reduce value.
+        rank = {"Fair": 1, "Good": 2, "Like New": 3, "Excellent": 4}
+        current = rank.get(str(profile.get("condition") or "Like New"), 3)
+        target = rank["Like New"]
+        bump = (target - current) * 0.03
     return round(low * (1 + bump), 2), round(high * (1 + bump), 2)
 
 
@@ -495,6 +599,8 @@ def _next_question_text(field_key: str, profile: Dict) -> str:
         "purity": "What is the purity (10K, 12K, 14K, 16K, 18K, 22K, PT950)?",
         "metal_weight_grams": "Do you know the approx metal weight in grams?",
         "brand_selection": "Is this branded or unbranded/unknown?",
+        "side_stone_present": "Does this jewelry have side stones?",
+        "side_stones": "Please share side-stone details like quantity and total carat weight (TCW), for example: 20 side stones, tcw 0.40 ct.",
     }
     return prompts.get(field_key, f"Could you share {_friendly_label(field_key)}?")
 
@@ -505,6 +611,16 @@ def _user_done_intent(msg: str) -> bool:
         "that is all", "that's all", "thats all", "no more", "no thats all",
         "no that's all", "all detail i have", "all details i have", "that's it",
         "thats it", "this is all", "nothing else", "thats all i have",
+    ]
+    return any(p in t for p in phrases)
+
+
+def _unknown_intent(msg: str) -> bool:
+    t = _norm(msg).lower()
+    phrases = [
+        "i dont know", "i don't know", "dont know", "don't know",
+        "not sure", "im not sure", "i am not sure", "no clue",
+        "unknown", "na", "n/a", "not available", "no idea", "dk", "idk",
     ]
     return any(p in t for p in phrases)
 
@@ -582,7 +698,14 @@ with left:
                 updates[k] = v
 
         profile = _merge_profile(profile, updates)
+
+        # Hard fallback: if user clearly says "not sure", mark current asked field as unknown.
+        if _unknown_intent(user_msg) and st.session_state.last_asked:
+            if st.session_state.last_asked not in unknown_fields:
+                unknown_fields.append(st.session_state.last_asked)
+
         profile = _apply_defaults(profile, unknown_fields, st.session_state.assumptions)
+        profile = _infer_stone_structure(profile, user_msg, st.session_state.last_asked)
 
         if _user_done_intent(user_msg):
             before_missing = _required_fields(profile)
@@ -702,15 +825,20 @@ with right:
             if w3.button("Sell in 2 Weeks"):
                 st.session_state.whatif = "timing"
             if st.session_state.whatif:
-                wl, wh = _what_if(low, high, st.session_state.whatif)
+                wl, wh = _what_if(low, high, st.session_state.whatif, p)
                 st.success(f"Scenario range: **${wl:,.0f}-${wh:,.0f}**")
 
             with st.expander("Center Stone Details"):
-                st.json(result.get("center_stone") or {})
+                st.json(result.get("diamond_anchor") or {})
             with st.expander("Side Stones Details"):
-                st.json(result.get("side_stones") or {})
+                st.json(result.get("side_stones_breakdown") or [])
             with st.expander("Metal Details"):
-                st.json(result.get("metal") or {})
+                st.json({
+                    "metal": p.get("metal"),
+                    "purity": p.get("purity"),
+                    "metal_weight_grams": p.get("metal_weight_grams"),
+                    "metal_value_usd": result.get("metal_value"),
+                })
 
             comps = _sort_comps(result.get("comparables") or [])
             if comps:
