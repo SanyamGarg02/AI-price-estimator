@@ -230,12 +230,14 @@ def get_anchor_with_fallback_gemgem(center_stone):
 
 
     search_levels = [
-        # strict
-        {"carat_delta": 0.1, "expand_levels": [0], "carat_step": 0},
-        # slight relaxation (smaller than regular)
-        {"carat_delta": 0.2, "expand_levels": [1], "carat_step": 1},
-        # regular relaxation
-        {"carat_delta": 0.5, "expand_levels": [0, 1], "carat_step": 2},
+        {"carat_delta": 0.0, "expand": 0, "drop_color_clarity": False, "carat_step": 0},
+        {"carat_delta": 0.0, "expand": 0, "drop_color_clarity": True, "carat_step": 0},
+        {"carat_delta": 0.1, "expand": 0, "drop_color_clarity": False, "carat_step": 1},
+        {"carat_delta": 0.1, "expand": 0, "drop_color_clarity": True, "carat_step": 1},
+        {"carat_delta": 0.2, "expand": 0, "drop_color_clarity": False, "carat_step": 2},
+        {"carat_delta": 0.2, "expand": 0, "drop_color_clarity": True, "carat_step": 2},
+        {"carat_delta": 0.5, "expand": 0, "drop_color_clarity": False, "carat_step": 3},
+        {"carat_delta": 0.5, "expand": 0, "drop_color_clarity": True, "carat_step": 3},
     ]
     best_attempt = None
 
@@ -243,137 +245,140 @@ def get_anchor_with_fallback_gemgem(center_stone):
         carat_min = round(carat - level["carat_delta"], 2)
         carat_max = round(carat + level["carat_delta"], 2)
         carat_step = level["carat_step"]
+        expand = level["expand"]
+        drop_color_clarity = level["drop_color_clarity"]
+        color_step = None if drop_color_clarity else expand
+        clarity_step = None if drop_color_clarity else expand
 
-        for expand in level["expand_levels"]:
-            color_step = expand
-            clarity_step = expand
-
+        if drop_color_clarity or color_idx is None or clarity_idx is None:
+            colors = COLOR_ORDER[:]
+            clarities = CLARITY_ORDER[:]
+        else:
             colors = COLOR_ORDER[
                 max(0, color_idx-expand): min(len(COLOR_ORDER), color_idx+expand+1)
             ]
-
             clarities = CLARITY_ORDER[
                 max(0, clarity_idx-expand): min(len(CLARITY_ORDER), clarity_idx+expand+1)
             ]
 
-            payload = build_gemgem_payload(center_stone, colors, clarities, carat_min, carat_max)
+        payload = build_gemgem_payload(center_stone, colors, clarities, carat_min, carat_max)
 
-            print("\n================ GEMGEM REQUEST ================")
-            print(payload)
-            print("================================================\n")
+        print("\n================ GEMGEM REQUEST ================")
+        print(payload)
+        print("================================================\n")
 
-            try:
-                data = _get_gemgem_response_with_cache(payload)
+        try:
+            data = _get_gemgem_response_with_cache(payload)
 
-                products = data["data"]["products"]["data"]
-                print("GemGem products found:", len(products))
+            products = data["data"]["products"]["data"]
+            print("GemGem products found:", len(products))
 
-                prices = [
-                    p["price"]["USD"]["price"]
-                    for p in products
-                    if p.get("price") and p["price"]["USD"].get("price")
-                ]
+            prices = [
+                p["price"]["USD"]["price"]
+                for p in products
+                if p.get("price") and p["price"]["USD"].get("price")
+            ]
 
-                if len(prices) > 0:
-                    weighted_prices = []
-                    weighted_comparables = []
-                    for p in products:
-                        price = _to_float(
-                            p.get("price", {})
-                            .get("USD", {})
-                            .get("price")
-                        )
-                        if price is None:
-                            continue
-                        weight = _compute_similarity_weight(
-                            p,
-                            {
-                                "carat": carat,
-                                "color": color,
-                                "clarity": clarity
-                            }
-                        )
-                        weighted_prices.append((price, weight))
-                        p_enriched = dict(p)
-                        p_enriched["similarity_weight"] = round(weight, 4)
-                        weighted_comparables.append(p_enriched)
-
-                    if not weighted_prices:
-                        continue
-
-                    weighted_prices.sort(key=lambda x: x[0])
-                    p25 = _weighted_percentile_price(weighted_prices, 0.25)
-                    p75 = _weighted_percentile_price(weighted_prices, 0.75)
-                    if p25 is None or p75 is None:
-                        continue
-
-                    weighted_comparables.sort(
-                        key=lambda x: _to_float(x.get("similarity_weight")) or 0.0,
-                        reverse=True
+            if len(prices) > 0:
+                weighted_prices = []
+                weighted_comparables = []
+                for p in products:
+                    price = _to_float(
+                        p.get("price", {})
+                        .get("USD", {})
+                        .get("price")
                     )
-
-                    count = len(weighted_prices)
-                    avg_weight = sum(w for _, w in weighted_prices) / count if count else 0.0
-                    discount_multiplier = 1.0
-                    if count < THIN_DATA_NO_DISCOUNT_MIN_COUNT:
-                        discount_multiplier = THIN_DATA_DISCOUNT_BY_COUNT.get(count, 0.55)
-                    discount_multiplier = _apply_thin_data_discount_floor(
-                        discount_multiplier,
-                        count,
-                        avg_weight,
-                        carat_step,
-                        expand
-                    )
-
-                    low = round(p25 * discount_multiplier, 2)
-                    high = round(p75 * discount_multiplier, 2)
-                    expansion_penalty = (max(0.0, level["carat_delta"] - 0.1) * 0.8) + (expand * 0.08) + (expand * 0.08)
-                    thin_data_penalty = 0.0 if discount_multiplier == 1.0 else (1.0 - discount_multiplier) * 0.5
-                    confidence_score = max(0.05, min(1.0, avg_weight - expansion_penalty - thin_data_penalty))
-
-                    candidate = {
-                        "low": low,
-                        "high": high,
-                        "effective_specs": {
-                            "carat_min": carat_min,
-                            "carat_max": carat_max,
-                            "color": colors,
-                            "clarity": clarities,
-                            "shape": center_stone["shape"],
-                            "cut": center_stone.get("cut"),
-                            "lab": center_stone.get("lab")
-                        },
-                        "fallback_level": {
-                            "carat_step": carat_step,
-                            "color_step": color_step,
-                            "clarity_step": clarity_step
-                        },
-                        "count": count,
-                        "used_fallback": (carat_step != 0 or color_step != 0 or clarity_step != 0),
-                        "comparables": weighted_comparables[:5],
-                        "insufficient_comparables": count < MIN_COMPARABLES_REQUIRED,
-                        "confidence": {
-                            "score": round(confidence_score, 2),
-                            "label": _confidence_label(confidence_score),
-                            "avg_similarity_weight": round(avg_weight, 2),
-                            "thin_data_discount_multiplier": round(discount_multiplier, 3),
-                            "weighted_method": True
-                        },
-                        "fallback_expansion": {
-                            "carat_delta": level["carat_delta"],
-                            "color_expand": expand,
-                            "clarity_expand": expand,
-                            "lab_broadened": False
+                    if price is None:
+                        continue
+                    weight = _compute_similarity_weight(
+                        p,
+                        {
+                            "carat": carat,
+                            "color": color,
+                            "clarity": clarity
                         }
+                    )
+                    weighted_prices.append((price, weight))
+                    p_enriched = dict(p)
+                    p_enriched["similarity_weight"] = round(weight, 4)
+                    weighted_comparables.append(p_enriched)
+
+                if not weighted_prices:
+                    continue
+
+                weighted_prices.sort(key=lambda x: x[0])
+                p25 = _weighted_percentile_price(weighted_prices, 0.25)
+                p75 = _weighted_percentile_price(weighted_prices, 0.75)
+                if p25 is None or p75 is None:
+                    continue
+
+                weighted_comparables.sort(
+                    key=lambda x: _to_float(x.get("similarity_weight")) or 0.0,
+                    reverse=True
+                )
+
+                count = len(weighted_prices)
+                avg_weight = sum(w for _, w in weighted_prices) / count if count else 0.0
+                discount_multiplier = 1.0
+                if count < THIN_DATA_NO_DISCOUNT_MIN_COUNT:
+                    discount_multiplier = THIN_DATA_DISCOUNT_BY_COUNT.get(count, 0.55)
+                discount_multiplier = _apply_thin_data_discount_floor(
+                    discount_multiplier,
+                    count,
+                    avg_weight,
+                    carat_step,
+                    expand
+                )
+
+                low = round(p25 * discount_multiplier, 2)
+                high = round(p75 * discount_multiplier, 2)
+                expansion_penalty = (max(0.0, level["carat_delta"] - 0.1) * 0.8) + (expand * 0.08) + (expand * 0.08)
+                thin_data_penalty = 0.0 if discount_multiplier == 1.0 else (1.0 - discount_multiplier) * 0.5
+                confidence_score = max(0.05, min(1.0, avg_weight - expansion_penalty - thin_data_penalty))
+
+                candidate = {
+                    "low": low,
+                    "high": high,
+                    "effective_specs": {
+                        "carat_min": carat_min,
+                        "carat_max": carat_max,
+                        "color": colors,
+                        "clarity": clarities,
+                        "shape": center_stone["shape"],
+                        "cut": center_stone.get("cut"),
+                        "lab": center_stone.get("lab")
+                    },
+                    "fallback_level": {
+                        "carat_step": carat_step,
+                        "color_step": color_step,
+                        "clarity_step": clarity_step
+                    },
+                    "count": count,
+                    "used_fallback": (carat_step != 0 or bool(color_step) or bool(clarity_step) or drop_color_clarity),
+                    "comparables": weighted_comparables[:5],
+                    "insufficient_comparables": count < MIN_COMPARABLES_REQUIRED,
+                    "confidence": {
+                        "score": round(confidence_score, 2),
+                        "label": _confidence_label(confidence_score),
+                        "avg_similarity_weight": round(avg_weight, 2),
+                        "thin_data_discount_multiplier": round(discount_multiplier, 3),
+                        "weighted_method": True
+                    },
+                    "fallback_expansion": {
+                        "carat_delta": level["carat_delta"],
+                        "color_expand": 0 if drop_color_clarity else expand,
+                        "clarity_expand": 0 if drop_color_clarity else expand,
+                        "lab_broadened": False
                     }
-                    if best_attempt is None or candidate["count"] > best_attempt["count"]:
-                        best_attempt = candidate
+                }
+                if best_attempt is None or candidate["count"] > best_attempt["count"]:
+                    best_attempt = candidate
 
-                    if candidate["count"] >= MIN_COMPARABLES_REQUIRED:
-                        return candidate
+                if candidate["count"] >= MIN_COMPARABLES_REQUIRED:
+                    return candidate
 
-            except Exception as e:
-                print("GemGem request failed:", e)
-                continue
+        except Exception as e:
+            print("GemGem request failed:", e)
+            continue
 
     return best_attempt

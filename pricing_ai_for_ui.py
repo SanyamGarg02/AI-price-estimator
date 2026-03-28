@@ -610,29 +610,13 @@ def run_pricing_pipeline(user_input, rapnet_token, ai_layer="Disabled"):
     confidence_action = _confidence_action(confidence_payload)
 
     if confidence_action == "block":
-        return {
-            "error": "Estimate confidence is too low for a standard user-facing quote. Please request manual review.",
-            "diamond_anchor": {
-                "low": diamond_anchor["low"],
-                "high": diamond_anchor["high"]
-            },
-            "effective_specs": anchor_result.get("effective_specs"),
-            "used_fallback": anchor_result.get("used_fallback", False),
-            "anchor_confidence": confidence_payload,
-            "fallback_expansion": anchor_result.get("fallback_expansion"),
-            "comparables": comparables,
-            "comparable_count": comparable_count,
-            "insufficient_comparables": anchor_result.get(
-                "insufficient_comparables",
-                comparable_count < 3
-            ),
-            "confidence_action": confidence_action
-        }
+        confidence_action = "manual_review"
 
     #
 
     # ---- Metal pricing ----
     metal_value = 0.0
+    metal_error = None
     if (
         user_input.get("jewelry_type") != "Loose Diamond"
         and user_input.get("metal_weight_grams")
@@ -643,8 +627,9 @@ def run_pricing_pipeline(user_input, rapnet_token, ai_layer="Disabled"):
                 purity=user_input["purity"],
                 weight_grams=user_input["metal_weight_grams"]
             )
-        except Exception:
+        except Exception as exc:
             metal_value = 0.0
+            metal_error = str(exc)
 
     # ---- Side stones pricing ----
     side_stone_value = _compute_side_stones_value(side_stones, rapnet_token)
@@ -679,6 +664,7 @@ def run_pricing_pipeline(user_input, rapnet_token, ai_layer="Disabled"):
         "fallback_expansion": anchor_result.get("fallback_expansion"),
         "base_price": base_price,
         "metal_value": metal_value,
+        "metal_error": metal_error,
         "side_stones_value": {
             "low": side_stone_value["low"],
             "high": side_stone_value["high"]
