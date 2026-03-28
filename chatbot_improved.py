@@ -653,7 +653,11 @@ with right_top:
 if "messages" not in st.session_state:
     st.session_state.messages = [{
         "role": "assistant",
-        "content": "Hi, I’m your jewelry pricing concierge. Tell me about the piece you want to sell, and I’ll guide you to a solid estimate."
+        "content": (
+            "Hi, I’m your jewelry pricing concierge. Start by describing your item and I’ll guide you to a solid estimate.\n\n"
+            "- Example (loose diamond): `2 ct loose diamond, color H, VVS1 clarity, excellent condition`\n"
+            "- Example (jewelry): `18K white gold ring, 1.5 ct center stone, color H, VVS1 clarity, excellent condition`"
+        )
     }]
 if "profile" not in st.session_state:
     st.session_state.profile = _default_profile()
@@ -728,35 +732,62 @@ with left:
         st.session_state.messages.append({"role": "assistant", "content": assistant_reply})
         st.rerun()
 
-    c1, c2, c3 = st.columns(3)
-    if c1.button("Estimate Now", use_container_width=True):
+    user_turns = sum(1 for m in st.session_state.messages if m.get("role") == "user")
+    if user_turns > 0:
         profile = st.session_state.profile
-        try:
-            res, msg = _run_estimate_and_message(profile, rapnet_token)
-            st.session_state.result = res
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": msg
-            })
-        except Exception as exc:
-            st.session_state.result = {"error": str(exc)}
-            st.session_state.messages.append({"role": "assistant", "content": "I hit an issue while estimating. Please retry once."})
-        st.rerun()
+        has_carat = float(profile.get("carat") or 0.0) > 0
+        if has_carat:
+            c1, c2 = st.columns(2)
+            if c1.button("Estimate Now", use_container_width=True):
+                try:
+                    res, msg = _run_estimate_and_message(profile, rapnet_token)
+                    st.session_state.result = res
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": msg
+                    })
+                except Exception as exc:
+                    st.session_state.result = {"error": str(exc)}
+                    st.session_state.messages.append({"role": "assistant", "content": "I hit an issue while estimating. Please retry once."})
+                st.rerun()
 
-    if c2.button("Add More Details", use_container_width=True):
-        missing = _required_fields(st.session_state.profile)
-        ask = _friendly_label(missing[0]) if missing else "any extra details (docs/photos/urgency)"
-        st.session_state.messages.append({"role": "assistant", "content": f"Sure. If you can share {ask}, I can sharpen the range."})
-        st.rerun()
+            if c2.button("I’m Not Sure", use_container_width=True):
+                missing = _required_fields(st.session_state.profile)
+                if missing:
+                    # Default only the current missing field, then continue collecting the next one.
+                    st.session_state.profile = _apply_defaults(
+                        st.session_state.profile,
+                        missing[:1],
+                        st.session_state.assumptions,
+                    )
+                    missing_after = _required_fields(st.session_state.profile)
+                    st.session_state.last_asked = missing_after[0] if missing_after else None
 
-    if c3.button("I’m Not Sure", use_container_width=True):
-        missing = _required_fields(st.session_state.profile)
-        if missing:
-            st.session_state.profile = _apply_defaults(st.session_state.profile, missing[:2], st.session_state.assumptions)
-            st.session_state.messages.append({"role": "assistant", "content": "No worries, I applied smart defaults for the next unknown details and we can still proceed."})
+                    if missing_after:
+                        next_q = _next_question_text(missing_after[0], st.session_state.profile)
+                        st.session_state.messages.append(
+                            {
+                                "role": "assistant",
+                                "content": f"No problem, I’ll use a smart default for that. {next_q}",
+                            }
+                        )
+                    else:
+                        st.session_state.messages.append(
+                            {
+                                "role": "assistant",
+                                "content": "Great, that’s enough detail now. Tap **Estimate Now** to generate your valuation.",
+                            }
+                        )
+                else:
+                    st.session_state.messages.append(
+                        {
+                            "role": "assistant",
+                            "content": "All good, we already have enough to proceed. Tap **Estimate Now** whenever you’re ready.",
+                        }
+                    )
+                st.rerun()
         else:
-            st.session_state.messages.append({"role": "assistant", "content": "All good, we already have enough to proceed."})
-        st.rerun()
+            st.caption("Share at least the carat value to unlock instant estimate.")
 
 with right:
     got, total, pct = _progress(st.session_state.profile)
