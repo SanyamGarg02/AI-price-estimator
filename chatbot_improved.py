@@ -217,6 +217,8 @@ def _required_fields(profile: Dict) -> List[str]:
 
 
 DEFAULTS = {
+    "carat": 1.0,
+    "shape": "Round",
     "color": "G",
     "clarity": "VS1",
     "cut": "Excellent",
@@ -654,7 +656,9 @@ if "messages" not in st.session_state:
     st.session_state.messages = [{
         "role": "assistant",
         "content": (
-            "Hi, I’m your jewelry pricing concierge. Start by describing your item and I’ll guide you to a solid estimate.\n\n"
+            "Hi, I’m your jewelry pricing assistant 👋\n\n"
+            "Describe your item (carat, shape, metal, etc.), and I’ll estimate its value for you.\n\n"
+            "You can keep it simple — even rough details work. For example:\n"
             "- Example (loose diamond): `2 ct loose diamond, color H, VVS1 clarity, excellent condition`\n"
             "- Example (jewelry): `18K white gold ring, 1.5 ct center stone, color H, VVS1 clarity, excellent condition`"
         )
