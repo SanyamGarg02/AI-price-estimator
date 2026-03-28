@@ -60,9 +60,31 @@ def _extract_comparable_specs(comp):
     }
 
 
+def _sort_comparables_for_display(comparables):
+    indexed = list(enumerate(comparables))
+
+    def _weight(comp):
+        try:
+            v = comp.get("similarity_weight")
+            if v in (None, "", "N/A"):
+                return None
+            return float(v)
+        except Exception:
+            return None
+
+    def _key(item):
+        idx, comp = item
+        w = _weight(comp)
+        if w is None:
+            return (1, 0.0, idx)
+        return (0, -w, idx)
+
+    return [comp for _, comp in sorted(indexed, key=_key)]
+
+
 def _display_comparables(result):
     comparable_count = result.get("comparable_count", 0)
-    comparables = result.get("comparables", [])
+    comparables = _sort_comparables_for_display(result.get("comparables", []))
     insufficient = result.get("insufficient_comparables", False)
 
     with st.expander(f"Comparable Diamonds Used ({comparable_count}) - Click to view specs"):
@@ -157,6 +179,7 @@ def _render_final_result_ui(result):
     center = result.get("diamond_anchor") or {}
     side = result.get("side_stones_value") or {"low": 0, "high": 0}
     metal_value = float(result.get("metal_value") or 0.0)
+    metal_error = result.get("metal_error")
     ai_adjust = result.get("ai_adjustment") or {"adjustment_percent": 0}
     final_price = result.get("final_price") or {"low": 0, "high": 0}
     confidence_action = result.get("confidence_action")
@@ -173,6 +196,8 @@ def _render_final_result_ui(result):
         (center.get("high") or 0) + (side.get("high") or 0)
     )
     _render_min_max_block("Metal Value", metal_value, metal_value)
+    if metal_error:
+        st.warning("Metal component could not be fetched from live pricing API; metal value is shown as $0.00.")
     _render_min_max_block("Total Price Range (After All Adjustments)", final_price.get("low"), final_price.get("high"))
 
     why_this_price = result.get("why_this_price")
@@ -220,7 +245,7 @@ def _render_final_result_ui(result):
             group_idx = group.get("index")
             with st.expander(f"Side Stone Group {group_idx} Comparables ({comp_count})"):
                 rows = []
-                for comp in group.get("comparables", []):
+                for comp in _sort_comparables_for_display(group.get("comparables", [])):
                     rows.append(_extract_comparable_specs(comp))
                 if rows:
                     st.dataframe(

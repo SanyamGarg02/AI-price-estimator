@@ -175,8 +175,10 @@ def _canonical_jewelry_type(value: Optional[str]) -> Optional[str]:
     for w in words:
         if difflib.get_close_matches(w, jewelry_tokens, n=1, cutoff=0.82):
             return "Diamond Jewelry"
-    # Strong jewelry intent signals.
-    if any(x in t for x in ["gold", "platinum", "pt950", "gram", "grams", "g "]):
+    # Strong jewelry intent signals (avoid broad "g " false positives).
+    if any(x in t for x in ["gold", "platinum", "pt950", "gram", "grams"]):
+        return "Diamond Jewelry"
+    if re.search(r"\b\d+(?:\.\d+)?\s*(?:g|gram|grams)\b", t):
         return "Diamond Jewelry"
     return None
 
@@ -192,6 +194,26 @@ def _extract_with_regex(text: str) -> Dict:
         if token in t:
             out["jewelry_item_type"] = item
             break
+
+    center_terms = [
+        "center stone",
+        "centre stone",
+        "main stone",
+        "primary stone",
+        "solitaire",
+        "single stone",
+    ]
+    explicit_no_center = any(
+        p in t
+        for p in [
+            "no center stone",
+            "without center stone",
+            "center stone not present",
+            "only side stone",
+            "only side stones",
+            "side stones only",
+        ]
+    )
 
     carat_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:ct|carat)", t)
     if carat_match:
@@ -264,18 +286,47 @@ def _extract_with_regex(text: str) -> Dict:
     if wt_match:
         out["metal_weight_grams"] = float(wt_match.group(1))
 
-    side_qty_match = re.search(r"(\d+)\s*(?:side\s*stones?|stones)\b", t)
-    if side_qty_match:
-        out["side_stone_present"] = True
-        out["side_stone_quantity"] = int(side_qty_match.group(1))
+    side_groups = []
+    pair_pattern = re.compile(
+        r"(\d+)\s*(?:side\s*stones?|stones)\b[^\d]{0,24}"
+        r"(?:tcw|total\s*carat(?:\s*weight)?|carat(?:\s*weight)?)\s*(?:is\s*)?"
+        r"(\d+(?:\.\d+)?)\s*(?:ct|carat)?"
+    )
+    for m in pair_pattern.finditer(t):
+        qty = int(m.group(1))
+        tcw = float(m.group(2))
+        if qty > 0 and tcw > 0:
+            side_groups.append(
+                {"stone_type": "Diamond", "quantity": qty, "total_carat_weight": tcw}
+            )
 
+    side_qty_match = re.search(r"(\d+)\s*(?:side\s*stones?|stones)\b", t)
     side_tcw_match = re.search(
         r"(?:side\s*stones?.*?(?:total|tcw|carat)|tcw)\D*(\d+(?:\.\d+)?)\s*(?:ct|carat)?",
         t,
     )
-    if side_tcw_match:
+    if side_groups:
+        out["side_stones"] = side_groups
         out["side_stone_present"] = True
-        out["side_stone_total_carat_weight"] = float(side_tcw_match.group(1))
+        out["side_stone_quantity"] = sum(g["quantity"] for g in side_groups)
+        out["side_stone_total_carat_weight"] = round(sum(g["total_carat_weight"] for g in side_groups), 4)
+    else:
+        if side_qty_match:
+            out["side_stone_present"] = True
+            out["side_stone_quantity"] = int(side_qty_match.group(1))
+        if side_tcw_match:
+            out["side_stone_present"] = True
+            out["side_stone_total_carat_weight"] = float(side_tcw_match.group(1))
+
+    if (
+        "carat" in out
+        and ("tcw" in t or "side stone" in t or "side stones" in t or "total carat" in t)
+        and not any(term in t for term in center_terms)
+    ):
+        out["carat"] = None
+
+    if explicit_no_center and out.get("side_stone_present") is True:
+        out["carat"] = None
 
     for key, val in BRAND_LOOKUP.items():
         if key in t:
@@ -605,16 +656,22 @@ def _extraction_confidence(
 
 
 def _next_question(profile: Dict, turn_seed: int) -> Tuple[Optional[str], Optional[str]]:
-    required = [
-        "jewelry_type",
-        "carat",
-        "shape",
-        "color",
-        "clarity",
-        "cut",
-        "fluorescence",
-        "condition",
-    ]
+    has_center_stone = float(profile.get("carat") or 0.0) > 0
+    has_side_groups = isinstance(profile.get("side_stones"), list) and len(profile.get("side_stones")) > 0
+    has_valid_side_stones = (
+        has_side_groups
+        or (
+            profile.get("side_stone_present") is True
+            and int(profile.get("side_stone_quantity") or 0) > 0
+            and float(profile.get("side_stone_total_carat_weight") or 0.0) > 0
+        )
+    )
+
+    required = ["jewelry_type", "condition"]
+    if has_center_stone:
+        required.extend(["carat", "shape", "color", "clarity", "cut", "fluorescence"])
+    elif not has_valid_side_stones:
+        required.append("carat")
     if profile.get("jewelry_type") == "Diamond Jewelry":
         required.extend(
             [
@@ -654,6 +711,24 @@ def _is_unknown_reply(text: str) -> bool:
         "n/a",
     ]
     return any(s in t for s in signals)
+
+
+def _message_implies_side_stones_only(text: str) -> bool:
+    t = _normalize_text(text).lower()
+    negative_center = [
+        "no center stone",
+        "without center stone",
+        "center stone not present",
+        "only side stone",
+        "only side stones",
+        "side stones only",
+    ]
+    has_negative_center = any(p in t for p in negative_center)
+    has_side_signal = any(p in t for p in ["tcw", "side stone", "side stones"])
+    has_center_signal = any(
+        p in t for p in ["center stone", "centre stone", "main stone", "solitaire", "single stone"]
+    )
+    return has_negative_center or (has_side_signal and not has_center_signal)
 
 
 def _default_metal_weight(item_type: Optional[str]) -> float:
@@ -864,6 +939,54 @@ def _sanitize_profile(profile: Dict) -> Dict:
     except Exception:
         p["side_stone_total_carat_weight"] = None
 
+    raw_groups = p.get("side_stones") if isinstance(p.get("side_stones"), list) else []
+    cleaned_groups = []
+    for g in raw_groups:
+        if not isinstance(g, dict):
+            continue
+        try:
+            qty = int(g.get("quantity") or 0)
+            tcw = float(g.get("total_carat_weight") or 0.0)
+        except Exception:
+            continue
+        if qty <= 0 or tcw <= 0:
+            continue
+        cleaned_groups.append(
+            {
+                "stone_type": "Diamond",
+                "quantity": qty,
+                "total_carat_weight": tcw,
+                "shape": g.get("shape"),
+                "color": g.get("color"),
+                "clarity": g.get("clarity"),
+                "cut": g.get("cut"),
+                "polish": g.get("polish"),
+                "symmetry": g.get("symmetry"),
+                "fluorescence": g.get("fluorescence"),
+            }
+        )
+    p["side_stones"] = cleaned_groups
+    if cleaned_groups:
+        p["side_stone_present"] = True
+        p["side_stone_quantity"] = sum(g["quantity"] for g in cleaned_groups)
+        p["side_stone_total_carat_weight"] = round(sum(g["total_carat_weight"] for g in cleaned_groups), 4)
+
+    if p.get("jewelry_type") == "Loose Diamond":
+        p["jewelry_item_type"] = None
+        p["metal"] = None
+        p["purity"] = None
+        p["metal_weight_grams"] = None
+        p["brand_selection"] = None
+        p["brand"] = None
+        p["brand_proof"] = None
+        p["side_stone_present"] = False
+        p["side_stone_quantity"] = None
+        p["side_stone_total_carat_weight"] = None
+        p["side_stone_shape"] = None
+        p["side_stone_color"] = None
+        p["side_stone_clarity"] = None
+        p["side_stone_cut"] = None
+
     return p
 
 
@@ -924,8 +1047,31 @@ def _extract_comparable_specs(comp: Dict) -> Dict:
         "Listing ID": listing_id if listing_id is not None else "N/A",
         "Name": name,
         "Price (USD)": price_usd,
+        "Similarity Weight": comp.get("similarity_weight", "N/A"),
         "Product URL": _build_product_url(comp),
     }
+
+
+def _sort_comparables_for_display(comparables):
+    indexed = list(enumerate(comparables))
+
+    def _weight(comp):
+        try:
+            v = comp.get("similarity_weight")
+            if v in (None, "", "N/A"):
+                return None
+            return float(v)
+        except Exception:
+            return None
+
+    def _key(item):
+        idx, comp = item
+        w = _weight(comp)
+        if w is None:
+            return (1, 0.0, idx)
+        return (0, -w, idx)
+
+    return [comp for _, comp in sorted(indexed, key=_key)]
 
 
 def _display_comparables_chatbot(result: Dict):
@@ -935,18 +1081,145 @@ def _display_comparables_chatbot(result: Dict):
         if not comparables:
             st.write("No comparable references available.")
             return
-        rows = [_extract_comparable_specs(c) for c in comparables]
+        rows = [_extract_comparable_specs(c) for c in _sort_comparables_for_display(comparables)]
         st.dataframe(
             rows,
             hide_index=True,
             use_container_width=True,
-            column_config={"Product URL": st.column_config.LinkColumn("Product URL")},
+            column_config={
+                "Product URL": st.column_config.LinkColumn("Product URL"),
+                "Similarity Weight": st.column_config.NumberColumn("Similarity Weight", format="%.3f"),
+            },
         )
+
+
+def _fmt_usd(value):
+    try:
+        if value is None:
+            return "N/A"
+        return f"${float(value):,.2f}"
+    except Exception:
+        return "N/A"
+
+
+def _render_min_max_block(title: str, low, high):
+    st.markdown(f"**{title}**")
+    c1, c2 = st.columns(2)
+    c1.metric("Min", _fmt_usd(low))
+    c2.metric("Max", _fmt_usd(high))
+
+
+def _render_chatbot_result_details(result: Dict):
+    center = result.get("diamond_anchor") or {}
+    side = result.get("side_stones_value") or {"low": 0, "high": 0}
+    metal_value = float(result.get("metal_value") or 0.0)
+    metal_error = result.get("metal_error")
+    ai_adjust = result.get("ai_adjustment") or {"adjustment_percent": 0}
+    final_price = result.get("final_price") or {}
+
+    final_low = final_price.get("low")
+    final_high = final_price.get("high")
+    if final_low is None or final_high is None:
+        final_low = (center.get("low") or 0) + (side.get("low") or 0) + metal_value
+        final_high = (center.get("high") or 0) + (side.get("high") or 0) + metal_value
+
+    _render_min_max_block(
+        "Diamond Value (Center + Side Stones)",
+        (center.get("low") or 0) + (side.get("low") or 0),
+        (center.get("high") or 0) + (side.get("high") or 0),
+    )
+    _render_min_max_block("Metal Value", metal_value, metal_value)
+    if metal_error:
+        st.warning("Metal component could not be fetched from live pricing API; metal value is shown as $0.00.")
+    _render_min_max_block("Total Price Range (After All Adjustments)", final_low, final_high)
+
+    with st.expander("Center Stone Details", expanded=False):
+        _render_min_max_block("Center Stone Value", center.get("low"), center.get("high"))
+        eff = result.get("effective_specs")
+        conf = result.get("anchor_confidence")
+        expansion = result.get("fallback_expansion")
+        if eff:
+            st.write(f"Shape: {eff.get('shape') or 'N/A'}")
+            st.write(f"Carat Range: {eff.get('carat_min')} - {eff.get('carat_max')}")
+            st.write(f"Color Range: {eff.get('color')}")
+            st.write(f"Clarity Range: {eff.get('clarity')}")
+            st.write(f"Lab: {eff.get('lab') or eff.get('labs') or 'N/A'}")
+        if conf:
+            st.write(f"Anchor Confidence: {conf.get('label', 'N/A')} ({conf.get('score', 'N/A')})")
+            st.write(f"Thin-Data Discount Multiplier: {conf.get('thin_data_discount_multiplier', 'N/A')}")
+        if expansion:
+            st.write(
+                "Fallback Expansion: "
+                f"carat_delta={expansion.get('carat_delta')}, "
+                f"color_expand={expansion.get('color_expand')}, "
+                f"clarity_expand={expansion.get('clarity_expand')}, "
+                f"lab_broadened={expansion.get('lab_broadened')}"
+            )
+
+    with st.expander("Side Stones Details", expanded=False):
+        _render_min_max_block("Side Stones Value", side.get("low"), side.get("high"))
+        breakdown = result.get("side_stones_breakdown", [])
+        if breakdown:
+            st.dataframe(breakdown, hide_index=True, use_container_width=True)
+        else:
+            st.write("No side stones added.")
+
+        side_comp_groups = result.get("side_stones_comparables", [])
+        for group in side_comp_groups:
+            if group.get("price_source") != "market_comparables":
+                continue
+            comp_count = int(group.get("comparable_count") or 0)
+            if comp_count <= 0:
+                continue
+            group_idx = group.get("index")
+            with st.expander(f"Side Stone Group {group_idx} Comparables ({comp_count})", expanded=False):
+                rows = [_extract_comparable_specs(comp) for comp in _sort_comparables_for_display(group.get("comparables", []))]
+                if rows:
+                    st.dataframe(
+                        rows,
+                        hide_index=True,
+                        use_container_width=True,
+                        column_config={"Product URL": st.column_config.LinkColumn("Product URL")},
+                    )
+                else:
+                    st.write("No comparable references available for this side-stone group.")
+
+    with st.expander("Metal Details", expanded=False):
+        _render_min_max_block("Metal Value", metal_value, metal_value)
+        st.write({"metal_value_usd": _fmt_usd(metal_value)})
+
+    st.markdown("**AI Adjustment**")
+    st.write(f"Adjustment Percent: {ai_adjust.get('adjustment_percent', 0)}%")
+    if ai_adjust.get("key_drivers"):
+        st.write(f"Key Drivers: {', '.join(ai_adjust.get('key_drivers', []))}")
+    if ai_adjust.get("missing_info"):
+        st.write(f"Missing Info: {', '.join(ai_adjust.get('missing_info', []))}")
+
+    _display_comparables_chatbot(result)
 
 
 def _build_user_input(profile: Dict) -> Dict:
     side_stones = []
-    if (
+    explicit_groups = profile.get("side_stones") if isinstance(profile.get("side_stones"), list) else []
+    if explicit_groups:
+        for g in explicit_groups:
+            if not isinstance(g, dict):
+                continue
+            side_stones.append(
+                {
+                    "stone_type": "Diamond",
+                    "quantity": int(g.get("quantity") or 0),
+                    "total_carat_weight": float(g.get("total_carat_weight") or 0.0),
+                    "shape": g.get("shape") or profile.get("side_stone_shape") or profile.get("shape"),
+                    "color": g.get("color") or profile.get("side_stone_color") or profile.get("color"),
+                    "clarity": g.get("clarity") or profile.get("side_stone_clarity") or profile.get("clarity"),
+                    "cut": g.get("cut") or profile.get("side_stone_cut") or profile.get("cut"),
+                    "polish": g.get("polish"),
+                    "symmetry": g.get("symmetry"),
+                    "fluorescence": g.get("fluorescence"),
+                }
+            )
+    elif (
         profile.get("side_stone_present") is True
         and profile.get("side_stone_quantity")
         and profile.get("side_stone_total_carat_weight")
@@ -1022,6 +1295,18 @@ def _prepare_safe_user_input(profile: Dict) -> Dict:
 
 def _friendly_bot_price_response(result: Dict, assumptions: Optional[list] = None, turn_seed: int = 0) -> str:
     if result.get("error"):
+        err = str(result.get("error") or "").lower()
+        anchor = result.get("diamond_anchor") or {}
+        if "confidence is too low" in err and anchor.get("low") is not None and anchor.get("high") is not None:
+            low = anchor.get("low")
+            high = anchor.get("high")
+            msg = (
+                f"I found a provisional range of ${low:,.0f}-${high:,.0f}, "
+                "but confidence is low, so manual review is recommended before quoting."
+            )
+            if assumptions:
+                msg += "\n\nAssumptions used: " + ", ".join(sorted(set(assumptions))) + "."
+            return msg
         return (
             "I couldn’t confidently price that yet. "
             "Please tweak specs slightly (especially carat/clarity/color) and I’ll try again."
@@ -1076,6 +1361,7 @@ def _render_profile_snapshot(profile: Dict):
         "Side Stones Present": profile.get("side_stone_present"),
         "Side Stone Qty": profile.get("side_stone_quantity"),
         "Side Stone Total Carat": profile.get("side_stone_total_carat_weight"),
+        "Side Stone Groups": profile.get("side_stones"),
     }
     st.json(snapshot)
 
@@ -1119,10 +1405,29 @@ with left:
 
         # If user explicitly says they don't know the last asked field, apply a safe default.
         last_asked_key = st.session_state.get("last_asked_key")
+        if last_asked_key == "jewelry_type":
+            direct_type = _canonical_jewelry_type(user_msg)
+            if direct_type:
+                profile["jewelry_type"] = direct_type
         if last_asked_key == "side_stone_present":
             yn = _parse_yes_no(user_msg)
             if yn is not None:
                 profile["side_stone_present"] = yn
+        if last_asked_key == "carat":
+            yn = _parse_yes_no(user_msg)
+            has_valid_side_stones = (
+                (
+                    isinstance(profile.get("side_stones"), list)
+                    and len(profile.get("side_stones")) > 0
+                )
+                or (
+                    profile.get("side_stone_present") is True
+                    and int(profile.get("side_stone_quantity") or 0) > 0
+                    and float(profile.get("side_stone_total_carat_weight") or 0.0) > 0
+                )
+            )
+            if yn is False and has_valid_side_stones:
+                profile["carat"] = None
         if last_asked_key in ("side_stone_quantity", "side_stone_total_carat_weight"):
             yn = _parse_yes_no(user_msg)
             if yn is False or _no_side_stone_intent_rule(user_msg):
@@ -1166,6 +1471,17 @@ with left:
         merged_updates.update({k: v for k, v in llm_updates.items() if v not in (None, "")})
         profile = _merge_profile(profile, merged_updates)
         profile = _sanitize_profile(profile)
+        if (
+            _message_implies_side_stones_only(user_msg)
+            and profile.get("side_stone_present") is True
+            and float(profile.get("side_stone_total_carat_weight") or 0.0) > 0
+        ):
+            profile["carat"] = None
+            profile = _sanitize_profile(profile)
+        inferred_type = _canonical_jewelry_type(user_msg)
+        if inferred_type and inferred_type != profile.get("jewelry_type"):
+            profile["jewelry_type"] = inferred_type
+            profile = _sanitize_profile(profile)
 
         # AI intent override: user indicates no side stones.
         if (llm_meta or {}).get("no_side_stones_intent"):
@@ -1259,14 +1575,26 @@ with right:
     if res:
         st.subheader("Latest Price Output")
         if res.get("error"):
-            st.error(res["error"])
+            err_text = str(res.get("error") or "")
+            anchor = res.get("diamond_anchor") or {}
+            if (
+                "confidence is too low" in err_text.lower()
+                and anchor.get("low") is not None
+                and anchor.get("high") is not None
+            ):
+                st.warning(err_text)
+                fp = res.get("final_price") or {"low": anchor.get("low"), "high": anchor.get("high")}
+                c1, c2 = st.columns(2)
+                c1.metric("Low (Provisional)", f"${(fp.get('low') or 0):,.2f}")
+                c2.metric("High (Provisional)", f"${(fp.get('high') or 0):,.2f}")
+                _render_chatbot_result_details(res)
+                st.caption("Provisional range shown due to low confidence. Manual review recommended.")
+            else:
+                st.error(err_text)
         else:
             fp = res.get("final_price", {})
             c1, c2 = st.columns(2)
             c1.metric("Low", f"${fp.get('low', 0):,.2f}")
             c2.metric("High", f"${fp.get('high', 0):,.2f}")
-            # Show comparables in chatbot output, especially useful for loose-diamond flow.
-            prof = st.session_state.get("profile", {})
-            if prof.get("jewelry_type") == "Loose Diamond":
-                _display_comparables_chatbot(res)
+            _render_chatbot_result_details(res)
             st.caption("Tip: you can edit details in chat and I’ll re-price instantly.")
