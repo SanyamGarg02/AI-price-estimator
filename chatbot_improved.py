@@ -151,6 +151,10 @@ def _sanitize_profile(p: Dict) -> Dict:
     else:
         profile["color"] = None
 
+    # Platinum should always use PT950 in this flow.
+    if profile.get("metal") == "Platinum":
+        profile["purity"] = "PT950"
+
     for k in ["carat", "metal_weight_grams"]:
         if profile.get(k) is not None:
             try:
@@ -208,12 +212,22 @@ def _required_fields(profile: Dict) -> List[str]:
         req += ["carat"]
 
     if profile.get("jewelry_type") == "Diamond Jewelry":
-        req += ["jewelry_item_type", "metal", "purity", "metal_weight_grams", "brand_selection"]
-        req += ["side_stone_present"]
+        # Ask side-stone flow right after metal details (before brand) for better UX.
+        req += ["jewelry_item_type", "metal", "purity", "metal_weight_grams", "side_stone_present"]
         if profile.get("side_stone_present") is True and not profile.get("side_stones"):
             req += ["side_stones"]
+        req += ["brand_selection"]
 
-    return [k for k in req if profile.get(k) in (None, "")]
+    missing = []
+    for k in req:
+        v = profile.get(k)
+        if k == "side_stones":
+            if not isinstance(v, list) or len(v) == 0:
+                missing.append(k)
+            continue
+        if v in (None, ""):
+            missing.append(k)
+    return missing
 
 
 DEFAULTS = {
@@ -224,11 +238,13 @@ DEFAULTS = {
     "cut": "Excellent",
     "condition": "Excellent",
     "fluorescence": "None",
+    "jewelry_item_type": "ring",
     "metal": "White Gold",
     "purity": "14K",
     "metal_weight_grams": 4.0,
     "brand_selection": "Other / Unknown",
     "brand_proof": "No",
+    "side_stone_present": False,
 }
 
 
@@ -236,8 +252,11 @@ def _apply_defaults(profile: Dict, unknown_fields: List[str], assumptions: List[
     p = dict(profile)
     for f in unknown_fields:
         if p.get(f) in (None, "") and f in DEFAULTS:
-            p[f] = DEFAULTS[f]
-            assumptions.append(f"{_friendly_label(f)}={DEFAULTS[f]}")
+            default_val = DEFAULTS[f]
+            if f == "purity" and p.get("metal") == "Platinum":
+                default_val = "PT950"
+            p[f] = default_val
+            assumptions.append(f"{_friendly_label(f)}={default_val}")
     return _sanitize_profile(p)
 
 
@@ -347,6 +366,18 @@ def _regex_fallback(user_msg: str, last_asked: Optional[str]) -> Dict:
         out["brand"] = None
         out["brand_proof"] = "No"
 
+    if last_asked == "brand_proof":
+        if re.search(r"\b(yes|y)\b", tl):
+            out["brand_proof"] = "Yes"
+        elif re.search(r"\b(no|none|nah|n)\b", tl):
+            out["brand_proof"] = "No"
+
+    if last_asked == "side_stone_present":
+        if re.search(r"\b(yes|y)\b", tl):
+            out["side_stone_present"] = True
+        elif re.search(r"\b(no|none|nah|n)\b", tl):
+            out["side_stone_present"] = False
+
     if "brand proof" in tl:
         if re.search(r"\b(yes|have|available)\b", tl):
             out["brand_proof"] = "Yes"
@@ -379,6 +410,31 @@ def _regex_fallback(user_msg: str, last_asked: Optional[str]) -> Dict:
         out["side_stone_present"] = True
 
     return out
+
+
+def _has_explicit_side_stone_specs(user_msg: str) -> bool:
+    tl = _norm(user_msg).lower()
+    # Require hard evidence like quantity + tcw/carat-weight pair.
+    pair = re.search(
+        r"(\d+)\s*(?:side\s*stones?|stones)\b[^\d]{0,24}(?:tcw|total\s*carat(?:\s*weight)?|carat(?:\s*weight)?)\s*(?:is\s*)?(\d+(?:\.\d+)?)",
+        tl,
+    )
+    return bool(pair)
+
+
+def _explicit_side_stone_presence(user_msg: str) -> Optional[bool]:
+    tl = _norm(user_msg).lower()
+    if re.search(r"\b(no|none|without)\s+side\s*stones?\b", tl):
+        return False
+    if re.search(r"\b(has|have|with)\s+side\s*stones?\b", tl):
+        return True
+    if re.search(r"\bside\s*stones?\b", tl) and _has_explicit_side_stone_specs(user_msg):
+        return True
+    if re.search(r"^\s*(yes|y)\s*$", tl):
+        return True
+    if re.search(r"^\s*(no|n|nah)\s*$", tl):
+        return False
+    return None
 
 
 def _ai_turn(user_msg: str, profile: Dict, missing: List[str], last_asked: Optional[str]) -> Dict:
@@ -607,6 +663,101 @@ def _next_question_text(field_key: str, profile: Dict) -> str:
     return prompts.get(field_key, f"Could you share {_friendly_label(field_key)}?")
 
 
+def _is_greeting(msg: str) -> bool:
+    t = _norm(msg).lower().strip()
+    greetings = {"hi", "hello", "hey", "hii", "yo", "good morning", "good evening", "good afternoon"}
+    return t in greetings or any(t.startswith(g + " ") for g in greetings)
+
+
+def _grouped_missing_text(keys: List[str]) -> str:
+    labels = {
+        "carat": "carat",
+        "shape": "shape",
+        "color": "color",
+        "clarity": "clarity",
+        "cut": "cut",
+        "fluorescence": "fluorescence",
+        "condition": "condition",
+        "metal": "metal",
+        "purity": "purity",
+        "metal_weight_grams": "metal weight (grams)",
+        "side_stone_present": "whether it has side stones",
+        "side_stones": "side stone details (quantity + total carat weight/TCW)",
+        "brand_selection": "brand info",
+    }
+    items = [labels.get(k, _friendly_label(k)) for k in keys]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return f"{', '.join(items[:-1])}, and {items[-1]}"
+
+
+def _conversation_followup(user_msg: str, profile: Dict, missing: List[str], ai_data: Dict) -> str:
+    t = _norm(user_msg).lower()
+    off_topic = bool((ai_data or {}).get("off_topic"))
+
+    if off_topic:
+        return (
+            "I may not know that part, but I can definitely help you get a strong diamond valuation. "
+            "Share your specs in one line and I’ll price it fast."
+        )
+
+    if _is_greeting(user_msg):
+        return (
+            "Hi! Happy to help. Tell me what you want to sell and share whatever specs you know "
+            "(carat, shape, color, clarity, cut, condition)."
+        )
+
+    jt = profile.get("jewelry_type")
+    if not jt:
+        return (
+            "Great — I can help with that. Is this a loose diamond or diamond jewelry? "
+            "If you already know specs, paste them in one line and I’ll pick them up."
+        )
+
+    diamond_core = ["carat", "shape", "color", "clarity", "cut", "fluorescence", "condition"]
+    core_missing = [k for k in diamond_core if k in missing]
+
+    if jt == "Loose Diamond":
+        if core_missing:
+            if len(core_missing) >= 3:
+                return (
+                    "Perfect. For a quick estimate, share these in one message: "
+                    f"{_grouped_missing_text(core_missing)}. Rough details are totally fine."
+                )
+            return f"Got it. Could you share {_grouped_missing_text(core_missing)}?"
+
+    if jt == "Diamond Jewelry":
+        if core_missing:
+            return (
+                "Great start. Please share center-stone specs in one line: "
+                f"{_grouped_missing_text(core_missing)}."
+            )
+
+        metal_group = [k for k in ["metal", "purity", "metal_weight_grams"] if k in missing]
+        if metal_group:
+            return (
+                "Nice. Now share jewelry metal details in one go: "
+                f"{_grouped_missing_text(metal_group)}."
+            )
+
+        if "side_stone_present" in missing:
+            return "Does this piece have any side stones? (yes/no)"
+        if "side_stones" in missing:
+            return (
+                "Please share side-stone specs in one line: quantity and total carat weight (TCW). "
+                "If you know side-stone color, shape, or clarity, add those too."
+            )
+        if "brand_selection" in missing:
+            return "Is this branded or unbranded/unknown?"
+
+    # Fallback
+    return _next_question_text(missing[0], profile)
+
+
 def _user_done_intent(msg: str) -> bool:
     t = _norm(msg).lower()
     phrases = [
@@ -624,7 +775,9 @@ def _unknown_intent(msg: str) -> bool:
         "not sure", "im not sure", "i am not sure", "no clue",
         "unknown", "na", "n/a", "not available", "no idea", "dk", "idk",
     ]
-    return any(p in t for p in phrases)
+    if any(p in t for p in phrases):
+        return True
+    return bool(re.match(r"^\s*(no|nah|n)\s*$", t))
 
 
 def _run_estimate_and_message(profile: Dict, rapnet_token: Optional[str]) -> Tuple[Dict, str]:
@@ -705,12 +858,44 @@ with left:
             if updates.get(k) in (None, "", []):
                 updates[k] = v
 
+        # Guardrail: never accept hallucinated side-stone groups unless user explicitly provided qty+TCW.
+        if isinstance(updates.get("side_stones"), list) and updates.get("side_stones"):
+            if not _has_explicit_side_stone_specs(user_msg):
+                updates.pop("side_stones", None)
+                if updates.get("side_stone_present") is None:
+                    updates["side_stone_present"] = True
+
+        # Guardrail: for jewelry flow, don't let model silently set side-stone presence
+        # unless the user explicitly said yes/no or provided side-stone specs.
+        if updates.get("jewelry_type") == "Diamond Jewelry" or profile.get("jewelry_type") == "Diamond Jewelry":
+            explicit_side_presence = _explicit_side_stone_presence(user_msg)
+            if explicit_side_presence is None:
+                updates.pop("side_stone_present", None)
+            else:
+                updates["side_stone_present"] = explicit_side_presence
+
         profile = _merge_profile(profile, updates)
 
-        # Hard fallback: if user clearly says "not sure", mark current asked field as unknown.
+        # Global unknown-intent handling: if user says idk/not sure/no idea, default current field and move on.
         if _unknown_intent(user_msg) and st.session_state.last_asked:
-            if st.session_state.last_asked not in unknown_fields:
-                unknown_fields.append(st.session_state.last_asked)
+            asked = st.session_state.last_asked
+            if asked == "side_stones":
+                updates["side_stones"] = []
+                updates["side_stone_present"] = False
+            elif asked == "side_stone_present":
+                updates["side_stone_present"] = False
+            elif asked in {"brand_selection", "brand"}:
+                updates["brand_selection"] = "Other / Unknown"
+                updates["brand"] = None
+                updates["brand_proof"] = "No"
+            elif asked == "brand_proof":
+                updates["brand_proof"] = "No"
+            else:
+                if asked not in unknown_fields:
+                    unknown_fields.append(asked)
+
+        # Apply any late unknown-intent update overrides to profile.
+        profile = _merge_profile(profile, updates)
 
         profile = _apply_defaults(profile, unknown_fields, st.session_state.assumptions)
         profile = _infer_stone_structure(profile, user_msg, st.session_state.last_asked)
@@ -731,7 +916,7 @@ with left:
             except Exception:
                 assistant_reply = "I have enough details now. Tap **Estimate Now** to generate your valuation."
         else:
-            assistant_reply = _next_question_text(missing_after[0], profile)
+            assistant_reply = _conversation_followup(user_msg, profile, missing_after, ai_data if isinstance(ai_data, dict) else {})
 
         st.session_state.messages.append({"role": "assistant", "content": assistant_reply})
         st.rerun()
@@ -758,7 +943,6 @@ with left:
             if c2.button("I’m Not Sure", use_container_width=True):
                 missing = _required_fields(st.session_state.profile)
                 if missing:
-                    # Default only the current missing field, then continue collecting the next one.
                     st.session_state.profile = _apply_defaults(
                         st.session_state.profile,
                         missing[:1],
@@ -766,9 +950,8 @@ with left:
                     )
                     missing_after = _required_fields(st.session_state.profile)
                     st.session_state.last_asked = missing_after[0] if missing_after else None
-
                     if missing_after:
-                        next_q = _next_question_text(missing_after[0], st.session_state.profile)
+                        next_q = _conversation_followup("", st.session_state.profile, missing_after, {"off_topic": False})
                         st.session_state.messages.append(
                             {
                                 "role": "assistant",
